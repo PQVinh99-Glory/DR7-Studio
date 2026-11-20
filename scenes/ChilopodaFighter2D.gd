@@ -150,7 +150,7 @@ func _render_burrow(tick: float, b: Dictionary = {}) -> void:
 		var t := clampf((tick - float(b["emerge_start_tick"])) / (float(b["emerge_end_tick"]) - float(b["emerge_start_tick"])), 0.0, 1.0)
 		dy = visible_depth * (1.0 - t * t * (3.0 - 2.0 * t))
 		if relocate:
-			global_position = action_origin_global + Vector2(action_facing * dx, 0)
+			global_position = action_origin_global + Vector2(action_facing * dx * absf(scale.x), 0)
 	sprite.position = Vector2(0, dy)
 	sprite.material.set_shader_parameter("clip_enabled", true)
 	sprite.material.set_shader_parameter("clip_y", -dy)

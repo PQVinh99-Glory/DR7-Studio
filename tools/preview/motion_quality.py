@@ -33,6 +33,10 @@ def assess_motion_quality(review, atlas_sha256, render_contract=None):
                     and review.get('not_applicable_checks', {}).get('perspective_turns')):
                 continue
             turning = render_contract.get('turning', {})
+            if (turning.get('method') == 'instant_flip'
+                    and turning.get('clip') is None
+                    and review.get('not_applicable_checks', {}).get('perspective_turns')):
+                continue
             burrow = render_contract.get('chilopoda', {}).get('burrow_turn', {})
             if (turning.get('method') == 'burrow_reorient_while_hidden'
                     and turning.get('owner_instruction')

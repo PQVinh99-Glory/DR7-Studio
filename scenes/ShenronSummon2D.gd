@@ -24,7 +24,7 @@ var dissolve_material: ShaderMaterial
 
 func _ready() -> void:
 	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-	z_index = 40
+	z_index = 52
 	var flash_layer := CanvasLayer.new()
 	flash_layer.layer = 90
 	add_child(flash_layer)

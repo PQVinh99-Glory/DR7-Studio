@@ -135,7 +135,7 @@ class ArenaStageParityTests(unittest.TestCase):
         self.assertEqual(stage_uai.get("attack_cooldown_s"), 1.0)
         self.assertEqual(stage_uai.get("light_hits_before_heavy"), 2)
         self.assertEqual(stage_uai.get("zone_width_max_px"), 500)
-        self.assertEqual(stage_uai.get("special_roles", {}).get("chilopoda"), "burrow_far_laser_close")
+        self.assertEqual(stage_uai.get("special_roles", {}).get("chilopoda"), "power_up_close_burrow_far")
         self.assertEqual(stage_uai.get("special_roles", {}).get("flight"), "hover_no_chase_ranged_far_melee_close")
 
     def test_http_server_serves_map_jpg_bezel_png_and_arena_stage_json(self) -> None:

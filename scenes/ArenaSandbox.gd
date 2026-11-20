@@ -1,5 +1,7 @@
 class_name ArenaSandbox
 extends Node2D
+
+signal logout_requested()
 ## Official DR7-Studio 16:9 (1920x1080) Landscape Mobile Arena Scene.
 ## Reads `res://assets/maps/rocky_plateau/arena-stage.json` and `res://assets/roster.json`
 ## directly so Godot 4 builds (Editor, Headless, Android APK, iOS IPA) and localhost:8080
@@ -7,16 +9,27 @@ extends Node2D
 
 const STAGE_JSON_PATH := "res://assets/maps/rocky_plateau/arena-stage.json"
 const TERRAIN_JSON_PATH := "res://assets/maps/rocky_plateau/terrain.json"
-const EXTENDED_MAP_PATH := "res://review/rocky_plateau_extension/combined.png"
+const EXTENDED_MAP_PATH := "res://assets/maps/rocky_plateau/rocky-plateau-extended-4steps.png"
+const FOREGROUND_PLANTED_TREES_PATH := "res://assets/maps/rocky_plateau/rocky-plateau-foreground-trees.png"
+const FOREGROUND_TREES_PATH := "res://assets/maps/rocky_plateau/rocky-plateau-foreground-trees.png"
+const FOREGROUND_TREES_COMPLETE_PATH := "res://assets/maps/rocky_plateau/rocky-plateau-foreground-trees.png"
 const MAP_LEFT_X := -240.0
-const MAP_RIGHT_X := 4560.0
+const MAP_RIGHT_X := 6360.0
 const MAP_TOP_Y := -210.0
 const MAP_BOTTOM_Y := 1140.0
 const MAP_JOIN_X := 2160.0
 const STEP_ONE_X := 2850.0
+const STEP_ONE_WALL_X := 2876.0
 const STEP_TWO_X := 3695.0
+const STEP_TWO_WALL_X := 3724.0
+const STEP_THREE_X := 4740.0
+const STEP_THREE_WALL_X := 4778.0
+const STEP_FOUR_X := 5560.0
+const STEP_FOUR_WALL_X := 5582.0
 const STEP_ONE_DROP_Y := 50.0
 const STEP_TWO_DROP_Y := 105.0
+const STEP_THREE_DROP_Y := 135.0
+const STEP_FOUR_DROP_Y := 190.0
 const ROSTER_JSON_PATH := "res://assets/roster.json"
 const REVIEW_ROSTER_JSON_PATH := "res://review/review-roster.json"
 const BODY_SILHOUETTES_JSON_PATH := "res://assets/body_silhouettes.json"
@@ -27,7 +40,7 @@ const PLAYER_LIGHT_ATTACK_COOLDOWN_S: float = 0.2
 const ShenronSummonScript := preload("res://scenes/ShenronSummon2D.gd")
 const DragonBallItemScene := preload("res://scenes/items/DragonBallItem2D.tscn")
 const DisplayPolicyScript := preload("res://scenes/runtime/DisplayPolicy.gd")
-const TouchHudOverlayScript := preload("res://scenes/runtime/TouchHudOverlay.gd")
+const I18nManagerScript := preload("res://scenes/runtime/I18nManager.gd")
 const PixelRulerModalScript := preload("res://scenes/runtime/PixelRulerModal.gd")
 const ArenaThemeScript := preload("res://scenes/runtime/ArenaTheme.gd")
 const MobileActionPadScript := preload("res://scenes/runtime/MobileActionPad.gd")
@@ -40,14 +53,29 @@ var summon_button: Button
 var wish_panel: PanelContainer
 var wish_notice_label: Label
 var _wish_notice_timer_s: float = 0.0
-var touch_hud: Control = null
+var i18n_manager = null
+var _extended_map_res_path: String = EXTENDED_MAP_PATH
+var _map_left_x: float = MAP_LEFT_X
+var _map_right_x: float = MAP_RIGHT_X
+var _map_top_y: float = MAP_TOP_Y
+var _map_bottom_y: float = MAP_BOTTOM_Y
+var _extended_step_configs: Array[Dictionary] = []
+var _foreground_trees_cfg: Dictionary = {}
 var _arena_camera: Camera2D = null
 var _bg_left_ext: Sprite2D = null
 var _bg_right_ext: Sprite2D = null
+var _foreground_trees: Node2D = null
 var pixel_perfect_enabled: bool = false
 var display_layout_info: Dictionary = {}
 var net_transport: NetworkTransport = null
 var zone_sync: ZoneClientSync = null
+var alpha_session_active: bool = false
+var alpha_session_profile: Dictionary = {}
+var _net_intent_accum_s: float = 0.0
+var _last_sent_action: String = ""
+var logout_button: Button = null
+var zone_selector: OptionButton = null
+var _zone_selector_syncing: bool = false
 
 const UtilityAIControllerScript := preload("res://scenes/UtilityAIController.gd")
 
@@ -163,6 +191,7 @@ var pad_settings_button: Button = null
 var toggle_ui_button: Button = null
 var immortal_button: Button = null
 var monster_range_button: Button = null
+var boss_spawn_button: Button = null
 var _arena_theme: Theme = null
 
 @onready var background_sprite: Sprite2D = get_node_or_null("BackgroundLayer/BackgroundSprite")
@@ -171,6 +200,7 @@ var _arena_theme: Theme = null
 
 
 func _ready() -> void:
+	i18n_manager = I18nManagerScript.new()
 	load_stage_and_roster()
 	_apply_stage_layout()
 	_setup_camera_and_display_policy()
@@ -182,14 +212,27 @@ func _ready() -> void:
 	_setup_ruler_control()
 	_setup_field_hud_controls()
 	_ensure_field_manager()
-	_refresh_dropped_items()
 	if DisplayServer.get_name() != "headless":
 		enable_field_mode(true, false)
-	elif not roster_characters.is_empty():
-		var start_id := default_character_id
-		if _find_character_entry(start_id).is_empty():
-			start_id = str(roster_characters[0].get("character_id", ""))
-		select_character(start_id)
+	else:
+		_refresh_dropped_items()
+		if not roster_characters.is_empty():
+			var start_id := default_character_id
+			if _find_character_entry(start_id).is_empty():
+				start_id = str(roster_characters[0].get("character_id", ""))
+			select_character(start_id)
+
+
+func get_language_locale() -> String:
+	if i18n_manager == null:
+		i18n_manager = I18nManagerScript.new()
+	return str(i18n_manager.get_locale())
+
+
+func set_language_locale(code: String) -> bool:
+	if i18n_manager == null:
+		i18n_manager = I18nManagerScript.new()
+	return bool(i18n_manager.set_locale(code))
 
 
 func _setup_camera_and_display_policy() -> void:
@@ -214,8 +257,6 @@ func _on_root_window_resized() -> void:
 	display_layout_info = DisplayPolicyScript.apply_to_root_window(root_win, pixel_perfect_enabled)
 	_update_background_cover()
 	_apply_hud_safe_area()
-	if touch_hud != null and is_instance_valid(touch_hud) and touch_hud.has_method("apply_safe_area"):
-		touch_hud.call("apply_safe_area", display_layout_info)
 	if mobile_pad != null and is_instance_valid(mobile_pad):
 		mobile_pad.apply_safe_area(display_layout_info)
 
@@ -226,12 +267,13 @@ func set_pixel_perfect_enabled(enabled: bool, sim_win_size: Vector2i = Vector2i.
 	display_layout_info = DisplayPolicyScript.apply_to_root_window(root_win, pixel_perfect_enabled, sim_win_size, sim_safe_rect)
 	_update_background_cover()
 	_apply_hud_safe_area()
-	if touch_hud != null and is_instance_valid(touch_hud) and touch_hud.has_method("apply_safe_area"):
-		touch_hud.call("apply_safe_area", display_layout_info)
 	if mobile_pad != null and is_instance_valid(mobile_pad):
 		mobile_pad.apply_safe_area(display_layout_info)
 	if pixel_perfect_button != null:
-		pixel_perfect_button.text = "Pixel: Perfect" if pixel_perfect_enabled else "Pixel: Fractional"
+		if bool(display_layout_info.get("below_1080p_guard", false)) and pixel_perfect_enabled:
+			pixel_perfect_button.text = "Pixel: Guard (<1080p)"
+		else:
+			pixel_perfect_button.text = "Pixel: Integer" if bool(display_layout_info.get("pixel_perfect_applied", false)) else "Pixel: Fractional"
 	return display_layout_info
 
 
@@ -287,7 +329,8 @@ func _ensure_field_manager() -> void:
 	if _field_overlay_node == null or not is_instance_valid(_field_overlay_node):
 		_field_overlay_node = Node2D.new()
 		_field_overlay_node.name = "FieldOverlayLayer"
-		_field_overlay_node.z_index = 60
+		_field_overlay_node.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		_field_overlay_node.z_index = 65
 		add_child(_field_overlay_node)
 		_field_overlay_node.draw.connect(_on_field_overlay_draw)
 
@@ -336,8 +379,6 @@ func _align_player_facing_to_active_move_dir() -> void:
 		dir -= 1
 	if mobile_pad != null and is_instance_valid(mobile_pad) and mobile_pad.analog_dir_x != 0:
 		dir = clampi(mobile_pad.analog_dir_x, -1, 1)
-	if touch_hud != null and is_instance_valid(touch_hud) and int(touch_hud.get("touch_dir_x")) != 0:
-		dir = clampi(int(touch_hud.get("touch_dir_x")), -1, 1)
 	if dir != 0:
 		player_facing_left = dir < 0
 		player_node.scale = Vector2(-char_scale if player_facing_left else char_scale, char_scale)
@@ -392,7 +433,10 @@ func _on_touch_action(action_name: String) -> void:
 		else:
 			_request_player_action("power_up")
 	elif action_name in ["attack_heavy"]:
-		_request_player_action(action_name)
+		if field_mode_enabled and field_manager != null and field_manager.active:
+			field_manager.request_player_heavy_action()
+		else:
+			_request_player_action(action_name)
 
 
 func _is_fighter_turning(fighter: Node) -> bool:
@@ -470,7 +514,7 @@ func _setup_summon_control() -> void:
 	wish_panel.anchor_right = 1.0
 	wish_panel.offset_left = -500.0
 	wish_panel.offset_right = -40.0
-	wish_panel.offset_top = 248.0
+	wish_panel.offset_top = 244.0
 	wish_panel.custom_minimum_size = Vector2(460, 0)
 	wish_panel.visible = false
 	var vbox := VBoxContainer.new()
@@ -579,7 +623,7 @@ func _apply_hud_safe_area() -> void:
 	if wish_panel != null:
 		wish_panel.offset_left = -500.0 - ins_r
 		wish_panel.offset_right = -40.0 - ins_r
-		wish_panel.offset_top = 248.0 + ins_t
+		wish_panel.offset_top = (124.0 + ins_t) if hud_ui_hidden else (244.0 + ins_t)
 	var row1_t := 68.0 + ins_t
 	var row1_b := 112.0 + ins_t
 	var row2_t := (120.0 + ins_t) if compact_top else row1_t
@@ -621,6 +665,11 @@ func _apply_hud_safe_area() -> void:
 		monster_range_button.offset_right = (676.0 + ins_l) if compact_top else (408.0 + ins_l)
 		monster_range_button.offset_top = row2_only_t
 		monster_range_button.offset_bottom = row2_only_b
+	if boss_spawn_button != null:
+		boss_spawn_button.offset_left = (20.0 + ins_l) if compact_top else (416.0 + ins_l)
+		boss_spawn_button.offset_right = (236.0 + ins_l) if compact_top else (632.0 + ins_l)
+		boss_spawn_button.offset_top = (row2_only_b + 6.0) if compact_top else row2_only_t
+		boss_spawn_button.offset_bottom = (row2_only_b + 50.0) if compact_top else row2_only_b
 	if ruler_modal != null and is_instance_valid(ruler_modal):
 		ruler_modal.apply_safe_area(insets)
 	if mobile_pad != null and is_instance_valid(mobile_pad):
@@ -684,6 +733,7 @@ func _setup_ruler_control() -> void:
 	ruler_modal.modal_closed.connect(func() -> void:
 		set_ruler_modal_visible(false)
 	)
+	ruler_modal.set_step_edges(_get_terrain_step_edges())
 	_apply_hud_safe_area()
 
 
@@ -742,6 +792,15 @@ func _setup_field_hud_controls() -> void:
 		hud_layer.add_child(monster_range_button)
 		_sync_monster_range_button()
 
+		boss_spawn_button = Button.new()
+		boss_spawn_button.name = "SpawnBossButton"
+		boss_spawn_button.text = "⚡ Gọi Boss Drum"
+		boss_spawn_button.add_theme_color_override("font_color", Color(1.0, 0.35, 0.35, 1.0))
+		boss_spawn_button.pressed.connect(func() -> void:
+			spawn_boss_drum_now()
+		)
+		hud_layer.add_child(boss_spawn_button)
+
 	if _arena_theme != null:
 		for c in hud_layer.get_children():
 			if c is Control and c != mobile_pad:
@@ -790,14 +849,28 @@ func set_show_monster_ranges(enabled: bool) -> void:
 	queue_redraw()
 
 
+func spawn_boss_drum_now() -> Dictionary:
+	if not field_mode_enabled:
+		enable_field_mode(true, true)
+	elif field_manager != null and (not field_manager.player_spawned or player_node == null):
+		set_field_hero_visible(true)
+	if field_manager == null:
+		return {}
+	var b := field_manager.spawn_boss_drum() as Dictionary
+	_update_hud()
+	queue_redraw()
+	return b
+
+
 func set_hud_ui_hidden(hidden: bool) -> void:
 	hud_ui_hidden = hidden
 	var vis_flag := not hidden
-	for n in [hud_label, pixel_perfect_button, ruler_button, pad_settings_button, immortal_button, monster_range_button, summon_button, item_toggle_button, item_drop_test_button, item_pickup_button]:
+	for n in [hud_label, pixel_perfect_button, ruler_button, pad_settings_button, immortal_button, monster_range_button, boss_spawn_button, summon_button, item_toggle_button, item_drop_test_button, item_pickup_button]:
 		if n != null and is_instance_valid(n):
 			n.visible = vis_flag
 	if toggle_ui_button != null:
 		toggle_ui_button.text = "👁️ Hiện UI" if hidden else "👁️ Ẩn UI"
+	_apply_hud_safe_area()
 
 
 func enable_field_mode(enabled: bool, spawn_hero: bool = false) -> void:
@@ -866,11 +939,17 @@ func _spawn_field_hero(char_id: String) -> bool:
 	return true
 
 
-func set_field_hero_visible(visible_flag: bool) -> void:
+func set_field_hero_visible(visible_flag: bool, hero_char_id: String = "drum", custom_spawn_x: float = -999999.0) -> void:
 	_ensure_field_manager()
-	active_character_id = "drum"
+	var resolved_cid := hero_char_id if not _find_character_entry(hero_char_id).is_empty() else "drum"
+	active_character_id = resolved_cid
 	if visible_flag:
-		if _spawn_field_hero("drum"):
+		if _spawn_field_hero(resolved_cid):
+			if custom_spawn_x > -900000.0 and player_node != null:
+				var sx := clampf(custom_spawn_x, walkable_min_x, walkable_max_x)
+				var entry := _find_character_entry(resolved_cid)
+				var sy := _get_entry_flight_y(entry) if _is_flying_entry(entry) else _ground_y_at(sx)
+				player_node.position = Vector2(sx, sy)
 			field_manager.player_spawned = true
 			field_manager.player_hp = field_manager.player_max_hp
 			field_manager.player_mana = 0.0
@@ -879,7 +958,7 @@ func set_field_hero_visible(visible_flag: bool) -> void:
 			field_manager.refresh_pointer_valid()
 			if mobile_pad != null and is_instance_valid(mobile_pad):
 				mobile_pad.visible = true
-				mobile_pad.configure_for_character("drum", _collect_clip_names(player_node), false)
+				mobile_pad.configure_for_character(resolved_cid, _collect_clip_names(player_node), false)
 				_sync_field_pad_state()
 	else:
 		_clear_fighter(player_node)
@@ -892,15 +971,145 @@ func set_field_hero_visible(visible_flag: bool) -> void:
 			mobile_pad.configure_for_character("", PackedStringArray(), false)
 			mobile_pad.visible = false
 	if toggle_hero_button != null:
-		toggle_hero_button.text = "👤 Ẩn Tướng (Drum)" if (field_manager != null and field_manager.player_spawned) else "👤 Hiện Tướng (Drum)"
+		toggle_hero_button.text = "👤 Ẩn Tướng (%s)" % resolved_cid.capitalize() if (field_manager != null and field_manager.player_spawned) else "👤 Hiện Tướng (%s)" % resolved_cid.capitalize()
 	_update_follow_camera()
 	_update_hud()
 	queue_redraw()
 
 
+func configure_alpha_session(session: Dictionary, transport: NetworkTransport, sync: ZoneClientSync) -> bool:
+	alpha_session_profile = session.duplicate(true)
+	alpha_session_active = true
+	if transport != null:
+		net_transport = transport
+	if sync != null:
+		zone_sync = sync
+		if net_transport != null:
+			zone_sync.attach_transport(net_transport)
+		if not zone_sync.snapshot_applied.is_connected(_on_zone_snapshot_applied):
+			zone_sync.snapshot_applied.connect(_on_zone_snapshot_applied)
+		if not zone_sync.combat_event_received.is_connected(_on_zone_combat_event):
+			zone_sync.combat_event_received.connect(_on_zone_combat_event)
+		if not zone_sync.zone_switched.is_connected(_on_zone_switched):
+			zone_sync.zone_switched.connect(_on_zone_switched)
+
+	var req_cid := str(session.get("character_id", "drum")).strip_edges()
+	if req_cid.is_empty() or _find_character_entry(req_cid).is_empty():
+		req_cid = "drum"
+	var spawn_x := float(session.get("spawn_x", 560.0))
+	var display_name := str(session.get("display_name", "Player"))
+
+	enable_field_mode(true, false)
+	_ensure_field_manager()
+	field_manager.local_display_name = display_name
+	field_manager.network_authoritative = true
+	if not field_manager.combat_action_emitted.is_connected(_on_local_combat_action_emitted):
+		field_manager.combat_action_emitted.connect(_on_local_combat_action_emitted)
+	if not field_manager.player_pve_damage_emitted.is_connected(_on_local_player_pve_damage_emitted):
+		field_manager.player_pve_damage_emitted.connect(_on_local_player_pve_damage_emitted)
+	set_field_hero_visible(true, req_cid, spawn_x)
+	_setup_alpha_session_hud()
+	if zone_sync != null and zone_sync.last_snapshot_tick >= 0:
+		_on_zone_snapshot_applied(zone_sync.last_snapshot_tick, {})
+	return true
+
+
+func _setup_alpha_session_hud() -> void:
+	var hud_layer := get_node_or_null("HUDLayer")
+	if hud_layer == null:
+		return
+	if logout_button == null:
+		logout_button = Button.new()
+		logout_button.name = "AlphaLogoutButton"
+		logout_button.text = "Đăng xuất"
+		logout_button.anchor_left = 0.0
+		logout_button.anchor_right = 0.0
+		logout_button.offset_left = 20.0
+		logout_button.offset_right = 152.0
+		logout_button.offset_top = 60.0
+		logout_button.offset_bottom = 98.0
+		logout_button.pressed.connect(func() -> void: logout_requested.emit())
+		hud_layer.add_child(logout_button)
+	if zone_selector == null:
+		zone_selector = OptionButton.new()
+		zone_selector.name = "AlphaZoneSelector"
+		zone_selector.anchor_left = 0.0
+		zone_selector.anchor_right = 0.0
+		zone_selector.offset_left = 162.0
+		zone_selector.offset_right = 316.0
+		zone_selector.offset_top = 60.0
+		zone_selector.offset_bottom = 98.0
+		for z in range(20):
+			zone_selector.add_item("Khu %d" % z, z)
+		zone_selector.item_selected.connect(func(idx: int) -> void:
+			if _zone_selector_syncing or zone_sync == null:
+				return
+			zone_sync.request_zone_switch(zone_sync.current_map_id, idx)
+		)
+		hud_layer.add_child(zone_selector)
+	if zone_sync != null and zone_selector != null:
+		_zone_selector_syncing = true
+		zone_selector.select(clampi(zone_sync.current_zone_id, 0, 19))
+		_zone_selector_syncing = false
+
+
+func _on_zone_snapshot_applied(_tick: int, _payload: Dictionary) -> void:
+	if not alpha_session_active or field_manager == null or zone_sync == null:
+		return
+	var local_uid := str(alpha_session_profile.get("user_id", zone_sync.local_user_id))
+	field_manager.sync_from_zone_snapshot(zone_sync.players_by_id, zone_sync.monsters_by_id, local_uid)
+	queue_redraw()
+
+
+func _on_zone_combat_event(ev: Dictionary) -> void:
+	if not alpha_session_active or field_manager == null or zone_sync == null:
+		return
+	var local_uid := str(alpha_session_profile.get("user_id", zone_sync.local_user_id))
+	field_manager.apply_network_combat_event(ev, local_uid)
+	queue_redraw()
+
+
+func _on_zone_switched(_map_id: String, zone_id: int) -> void:
+	if zone_selector != null:
+		_zone_selector_syncing = true
+		zone_selector.select(clampi(zone_id, 0, 19))
+		_zone_selector_syncing = false
+
+
+func _on_local_combat_action_emitted(action_kind: String, target_id: String, target_kind: String, origin_pos: Vector2, facing_left: bool) -> void:
+	if not alpha_session_active or zone_sync == null:
+		return
+	zone_sync.send_combat_action(action_kind, target_id, target_kind, origin_pos, facing_left)
+
+
+func _on_local_player_pve_damage_emitted(damage: float, new_hp: float, alive: bool) -> void:
+	if not alpha_session_active or zone_sync == null:
+		return
+	zone_sync.send_player_pve_state(damage, new_hp, alive)
+
+
+func step_alpha_network(delta: float, move_dir: int = 0) -> void:
+	if not alpha_session_active or net_transport == null or zone_sync == null:
+		return
+	net_transport.poll_events()
+	if field_manager != null and field_manager.active:
+		field_manager.step_remote_players(delta)
+	if player_node == null or not zone_sync.is_ready_to_play():
+		return
+	var pspr := player_node.get_node_or_null("Sprite") as AnimatedSprite2D
+	var cur_act := String(pspr.animation) if pspr != null else "idle"
+	_net_intent_accum_s += delta
+	if _net_intent_accum_s >= 0.05 or cur_act != _last_sent_action:
+		_net_intent_accum_s = 0.0
+		_last_sent_action = cur_act
+		zone_sync.send_player_intent(player_node.position, move_dir, cur_act, player_node.scale.x < 0.0)
+
+
 func set_ruler_modal_visible(visible_flag: bool) -> void:
 	ruler_modal_visible = visible_flag
 	if ruler_modal != null and is_instance_valid(ruler_modal):
+		if visible_flag:
+			ruler_modal.set_step_edges(_get_terrain_step_edges())
 		ruler_modal.visible = visible_flag
 	if visible_flag:
 		_sync_ruler_ui()
@@ -933,10 +1142,36 @@ func set_ruler_points(point_a: Vector2, point_b: Vector2) -> Dictionary:
 	return get_ruler_metrics()
 
 
+func _resolve_ruler_enemy_target() -> Dictionary:
+	if dummy_node != null and is_instance_valid(dummy_node):
+		return {"node": dummy_node, "cid": enemy_character_id, "scale": enemy_scale}
+	if field_mode_enabled and field_manager != null and field_manager.active:
+		var chosen: Dictionary = {}
+		if field_manager.pointer_kind == "enemy" and not str(field_manager.pointer_slot_id).is_empty():
+			for s in field_manager._get_combat_slots():
+				if str(s.get("id", "")) == str(field_manager.pointer_slot_id) and bool(s.get("alive", false)) and is_instance_valid(s.get("node")):
+					chosen = s
+					break
+		if chosen.is_empty():
+			var ref_x := player_node.position.x if player_node != null else player_spawn_x
+			var best_d := 1e9
+			for s in field_manager._get_combat_slots():
+				if bool(s.get("alive", false)) and is_instance_valid(s.get("node")):
+					var d := absf((s["node"] as Node2D).position.x - ref_x)
+					if d < best_d:
+						best_d = d
+						chosen = s
+		if not chosen.is_empty():
+			return {"node": chosen["node"], "cid": str(chosen.get("character_id", "")), "scale": float(chosen.get("scale_val", 2.0))}
+	return {}
+
+
 func measure_player_enemy_distance() -> Dictionary:
-	if player_node != null and dummy_node != null:
+	var enemy_tgt := _resolve_ruler_enemy_target()
+	var enode := enemy_tgt.get("node") as Node2D
+	if player_node != null and enode != null:
 		ruler_point_a = Vector2(roundf(player_node.position.x), roundf(player_node.position.y))
-		ruler_point_b = Vector2(roundf(dummy_node.position.x), roundf(dummy_node.position.y))
+		ruler_point_b = Vector2(roundf(enode.position.x), roundf(enode.position.y))
 		ruler_has_a = true
 		ruler_has_b = true
 	_sync_ruler_ui()
@@ -945,7 +1180,11 @@ func measure_player_enemy_distance() -> Dictionary:
 
 func get_ruler_metrics() -> Dictionary:
 	var p_entry := _find_character_entry_ro(active_character_id)
-	var e_entry := _find_character_entry_ro(enemy_character_id)
+	var enemy_tgt := _resolve_ruler_enemy_target()
+	var enode := enemy_tgt.get("node") as Node2D
+	var ecid := str(enemy_tgt.get("cid", enemy_character_id))
+	var escale := float(enemy_tgt.get("scale", enemy_scale))
+	var e_entry := _find_character_entry_ro(ecid)
 	var p_dims := _get_body_dims(p_entry)
 	var e_dims := _get_body_dims(e_entry)
 	var pw := float(p_dims.x) if p_dims.x > 0 else 140.0
@@ -953,9 +1192,9 @@ func get_ruler_metrics() -> Dictionary:
 	var ew := float(e_dims.x) if e_dims.x > 0 else 140.0
 	var eh := float(e_dims.y) if e_dims.y > 0 else 140.0
 	var p_pos := player_node.position if player_node != null else Vector2(player_spawn_x, ground_y)
-	var e_pos := dummy_node.position if dummy_node != null else Vector2(dummy_spawn_x, ground_y)
+	var e_pos := enode.position if enode != null else Vector2(dummy_spawn_x, ground_y)
 	var r_a: Rect2 = UtilityAIControllerScript.compute_body_rect(p_pos.x, p_pos.y, pw, ph, char_scale)
-	var r_b: Rect2 = UtilityAIControllerScript.compute_body_rect(e_pos.x, e_pos.y, ew, eh, enemy_scale)
+	var r_b: Rect2 = UtilityAIControllerScript.compute_body_rect(e_pos.x, e_pos.y, ew, eh, escale)
 	var edge_gap: float = UtilityAIControllerScript.compute_edge_distance(r_a, r_b)
 	var dx := absf(ruler_point_b.x - ruler_point_a.x) if (ruler_has_a and ruler_has_b) else 0.0
 	var dy := absf(ruler_point_b.y - ruler_point_a.y) if (ruler_has_a and ruler_has_b) else 0.0
@@ -977,7 +1216,7 @@ func get_ruler_metrics() -> Dictionary:
 		"player_pos": [p_pos.x, p_pos.y],
 		"enemy_pos": [e_pos.x, e_pos.y],
 		"player_size_px": [pw * char_scale, ph * char_scale],
-		"enemy_size_px": [ew * enemy_scale, eh * enemy_scale],
+		"enemy_size_px": [ew * escale, eh * escale],
 		"player_enemy_center_dx": absf(e_pos.x - p_pos.x),
 		"player_enemy_dy": absf(e_pos.y - p_pos.y),
 		"player_enemy_edge_gap": edge_gap,
@@ -1075,6 +1314,8 @@ func load_stage_and_roster() -> void:
 			if p is Dictionary:
 				terrain_platforms.append(p)
 
+	_load_extended_map_config()
+
 	var roster := _read_json_dict(ROSTER_JSON_PATH)
 	var chars_variant: Variant = roster.get("characters", [])
 	roster_characters = chars_variant if chars_variant is Array else []
@@ -1140,31 +1381,84 @@ func _get_visible_logic_size() -> Vector2:
 	return Vector2(float(viewport_width), float(viewport_height))
 
 
+func _load_extended_map_config() -> void:
+	_extended_map_res_path = EXTENDED_MAP_PATH
+	_map_left_x = MAP_LEFT_X
+	_map_right_x = MAP_RIGHT_X
+	_map_top_y = MAP_TOP_Y
+	_map_bottom_y = MAP_BOTTOM_Y
+	_extended_step_configs.clear()
+	_foreground_trees_cfg = {}
+
+	var map_cfg: Variant = stage_config.get("map", {})
+	var ext: Dictionary = map_cfg.get("extended_map", {}) if map_cfg is Dictionary else {}
+	if not ext.is_empty():
+		var bg_res := str(ext.get("background_res_path", ""))
+		if not bg_res.is_empty():
+			_extended_map_res_path = bg_res
+		var wb: Variant = ext.get("world_bounds", {})
+		if wb is Dictionary:
+			_map_left_x = float(wb.get("left_x", MAP_LEFT_X))
+			_map_right_x = float(wb.get("right_x", MAP_RIGHT_X))
+			_map_top_y = float(wb.get("top_y", MAP_TOP_Y))
+			_map_bottom_y = float(wb.get("bottom_y", MAP_BOTTOM_Y))
+		var raw_steps: Variant = ext.get("steps", [])
+		if raw_steps is Array:
+			for st_item in raw_steps:
+				if st_item is Dictionary and st_item.has("drop_x"):
+					_extended_step_configs.append({
+						"drop_x": float(st_item.get("drop_x", 0.0)),
+						"wall_x": float(st_item.get("wall_x", st_item.get("drop_x", 0.0))),
+						"drop_y": float(st_item.get("drop_y", 0.0)),
+					})
+		var fg_val: Variant = ext.get("foreground_trees", {})
+		if fg_val is Dictionary:
+			_foreground_trees_cfg = fg_val
+	if _extended_step_configs.is_empty():
+		_extended_step_configs = [
+			{"drop_x": STEP_ONE_X, "wall_x": STEP_ONE_WALL_X, "drop_y": STEP_ONE_DROP_Y},
+			{"drop_x": STEP_TWO_X, "wall_x": STEP_TWO_WALL_X, "drop_y": STEP_TWO_DROP_Y},
+			{"drop_x": STEP_THREE_X, "wall_x": STEP_THREE_WALL_X, "drop_y": STEP_THREE_DROP_Y},
+			{"drop_x": STEP_FOUR_X, "wall_x": STEP_FOUR_WALL_X, "drop_y": STEP_FOUR_DROP_Y},
+		]
+	_extended_step_configs.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return float(a["drop_x"]) < float(b["drop_x"])
+	)
+
+
 func _has_extended_terrain_steps() -> bool:
-	return ResourceLoader.exists(EXTENDED_MAP_PATH)
+	return ResourceLoader.exists(_extended_map_res_path)
 
 
 func _get_terrain_sections() -> Array:
 	if not _has_extended_terrain_steps():
-		return [{"left_x": MAP_LEFT_X, "right_x": MAP_RIGHT_X, "ground_y": ground_y}]
-	return [
-		{"left_x": MAP_LEFT_X, "right_x": STEP_ONE_X, "ground_y": ground_y},
-		{"left_x": STEP_ONE_X, "right_x": STEP_TWO_X, "ground_y": ground_y + STEP_ONE_DROP_Y},
-		{"left_x": STEP_TWO_X, "right_x": MAP_RIGHT_X, "ground_y": ground_y + STEP_TWO_DROP_Y},
-	]
+		return [{"left_x": _map_left_x, "right_x": _map_right_x, "ground_y": ground_y}]
+	var sections: Array = []
+	var prev_x := _map_left_x
+	var prev_y := ground_y
+	for st in _extended_step_configs:
+		var dx := float(st["drop_x"])
+		sections.append({"left_x": prev_x, "right_x": dx, "ground_y": prev_y})
+		prev_x = dx
+		prev_y = ground_y + float(st["drop_y"])
+	sections.append({"left_x": prev_x, "right_x": _map_right_x, "ground_y": prev_y})
+	return sections
 
 
 func _get_terrain_step_edges() -> Array[float]:
 	if not _has_extended_terrain_steps():
 		return []
-	return [STEP_ONE_X, STEP_TWO_X]
+	var edges: Array[float] = []
+	for st in _extended_step_configs:
+		edges.append(float(st["drop_x"]))
+	return edges
 
 
 func _get_fighter_walk_bounds_x(entry: Dictionary, sc: float) -> Vector2:
 	var vis_w := _get_visible_logic_size().x
 	var center_x := float(viewport_width) * 0.5
-	var view_left := MAP_LEFT_X if _has_extended_terrain_steps() else (center_x - vis_w * 0.5)
-	var view_right := MAP_RIGHT_X if _has_extended_terrain_steps() else (center_x + vis_w * 0.5)
+	var view_left := _map_left_x if _has_extended_terrain_steps() else (center_x - vis_w * 0.5)
+	var view_right := _map_right_x if _has_extended_terrain_steps() else (center_x + vis_w * 0.5)
 	var dims := _get_body_dims(entry)
 	var raw_half := (float(dims.x) * sc * 0.5) if dims.x > 0 else (70.0 * sc)
 	var pad := clampf(raw_half, 16.0, maxf(16.0, vis_w * 0.45))
@@ -1198,11 +1492,12 @@ func _update_background_cover() -> void:
 		return
 	var vis := _get_visible_logic_size()
 	if _has_extended_terrain_steps():
-		var extension := _load_texture_2d(EXTENDED_MAP_PATH)
+		var extension := _load_texture_2d(_extended_map_res_path)
 		if extension != null:
 			background_sprite.texture = extension
 			background_sprite.scale = Vector2.ONE
-			background_sprite.position = Vector2(MAP_LEFT_X, MAP_TOP_Y)
+			background_sprite.position = Vector2(_map_left_x, _map_top_y)
+			_setup_foreground_trees()
 			_update_walkable_bounds()
 			_update_follow_camera()
 			queue_redraw()
@@ -1222,15 +1517,57 @@ func _update_background_cover() -> void:
 	queue_redraw()
 
 
+func _setup_foreground_trees() -> void:
+	if _foreground_trees != null and is_instance_valid(_foreground_trees):
+		return
+	var trees_res := str(_foreground_trees_cfg.get("res_path", FOREGROUND_PLANTED_TREES_PATH))
+	var planted_texture := _load_texture_2d(trees_res)
+	if planted_texture == null:
+		return
+	_foreground_trees = Node2D.new()
+	_foreground_trees.name = "ReviewForegroundTrees"
+	_foreground_trees.z_index = int(_foreground_trees_cfg.get("z_index", -20))
+	add_child(_foreground_trees)
+	var sc_arr: Variant = _foreground_trees_cfg.get("scale", [0.70, 0.94])
+	var tree_scale := Vector2(
+		float(sc_arr[0]) if (sc_arr is Array and sc_arr.size() >= 2) else 0.70,
+		float(sc_arr[1]) if (sc_arr is Array and sc_arr.size() >= 2) else 0.94
+	)
+	var raw_placements: Variant = _foreground_trees_cfg.get("placements", [])
+	var placements: Array = raw_placements if (raw_placements is Array and not raw_placements.is_empty()) else [
+		{"region": [0.0, 0.0, 598.0, 907.0], "trunk_source_x": 264.51, "root_bottom_src_y": 904.0, "trunk_world_x": 4695.0, "rear_grass_world_y": 828.0},
+		{"region": [598.0, 0.0, 741.0, 1067.0], "trunk_source_x": 298.61, "root_bottom_src_y": 1064.0, "trunk_world_x": 5420.0, "rear_grass_world_y": 888.0},
+		{"region": [1339.0, 0.0, 688.0, 1088.0], "trunk_source_x": 312.60, "root_bottom_src_y": 1085.0, "trunk_world_x": 6050.0, "rear_grass_world_y": 954.0},
+	]
+	for i in range(placements.size()):
+		var pl: Dictionary = placements[i]
+		var reg: Array = pl.get("region", [0.0, 0.0, 598.0, 907.0])
+		if reg.size() < 4:
+			continue
+		var atlas := AtlasTexture.new()
+		atlas.atlas = planted_texture
+		atlas.region = Rect2(float(reg[0]), float(reg[1]), float(reg[2]), float(reg[3]))
+		var tree_sprite := Sprite2D.new()
+		tree_sprite.name = "ForegroundTree%d" % (i + 1)
+		tree_sprite.texture = atlas
+		tree_sprite.centered = false
+		tree_sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		tree_sprite.scale = tree_scale
+		var tx := float(pl.get("trunk_world_x", 0.0)) - float(pl.get("trunk_source_x", 0.0)) * tree_scale.x
+		var ty := float(pl.get("rear_grass_world_y", ground_y)) - float(pl.get("root_bottom_src_y", 0.0)) * tree_scale.y
+		tree_sprite.position = Vector2(tx, ty)
+		_foreground_trees.add_child(tree_sprite)
+
+
 func _update_follow_camera() -> void:
 	if _arena_camera == null:
 		return
 	var vis := _get_visible_logic_size()
 	var has_ext := _has_extended_terrain_steps()
-	var left_b := MAP_LEFT_X if has_ext else 0.0
-	var right_b := MAP_RIGHT_X if has_ext else float(viewport_width)
-	var top_b := MAP_TOP_Y if has_ext else 0.0
-	var bottom_b := MAP_BOTTOM_Y if has_ext else float(viewport_height)
+	var left_b := _map_left_x if has_ext else 0.0
+	var right_b := _map_right_x if has_ext else float(viewport_width)
+	var top_b := _map_top_y if has_ext else 0.0
+	var bottom_b := _map_bottom_y if has_ext else float(viewport_height)
 	var map_w := maxf(1.0, right_b - left_b)
 	var map_h := maxf(1.0, bottom_b - top_b)
 
@@ -1259,28 +1596,95 @@ func _update_follow_camera() -> void:
 	_arena_camera.position = Vector2(cam_x, cam_y)
 
 
+func _get_terrain_step_specs() -> Array[Dictionary]:
+	if not _has_extended_terrain_steps():
+		return []
+	var specs: Array[Dictionary] = []
+	var prev_y := ground_y
+	for st in _extended_step_configs:
+		var lower_y := ground_y + float(st["drop_y"])
+		specs.append({
+			"drop_x": float(st["drop_x"]),
+			"wall_x": float(st["wall_x"]),
+			"upper_y": prev_y,
+			"lower_y": lower_y,
+		})
+		prev_y = lower_y
+	return specs
+
+
+static func _step_wall_x_at_y(spec: Dictionary, y: float) -> float:
+	var drop_x := float(spec["drop_x"])
+	var wall_x := float(spec["wall_x"])
+	var upper_y := float(spec["upper_y"])
+	var lower_y := float(spec["lower_y"])
+	if y <= upper_y:
+		return drop_x
+	if y >= lower_y:
+		return wall_x
+	var t := (y - upper_y) / maxf(1.0, lower_y - upper_y)
+	return lerpf(drop_x, wall_x, t)
+
+
 func _ground_y_at(world_x: float) -> float:
 	if not _has_extended_terrain_steps():
 		return ground_y
-	if world_x < STEP_ONE_X:
+	var y := ground_y
+	for st in _extended_step_configs:
+		if world_x < float(st["drop_x"]):
+			return y
+		y = ground_y + float(st["drop_y"])
+	return y
+
+
+func _terrain_surface_y_at(world_x: float) -> float:
+	if not _has_extended_terrain_steps():
 		return ground_y
-	if world_x < STEP_TWO_X:
-		return ground_y + STEP_ONE_DROP_Y
-	return ground_y + STEP_TWO_DROP_Y
+	var prev_y := ground_y
+	for st in _extended_step_configs:
+		var drop_x := float(st["drop_x"])
+		var wall_x := float(st["wall_x"])
+		var lower_y := ground_y + float(st["drop_y"])
+		if world_x <= drop_x:
+			return prev_y
+		if world_x < wall_x and wall_x > drop_x:
+			var frac := (world_x - drop_x) / (wall_x - drop_x)
+			return lerpf(prev_y, lower_y, frac)
+		prev_y = lower_y
+	return prev_y
 
 
 func terrain_blocks_segment(from_pos: Vector2, to_pos: Vector2) -> bool:
-	# The same world geometry drives projectile hits and solid step walls.
-	if to_pos.y >= _ground_y_at(to_pos.x):
+	# Exact continuous intersection against the piecewise-linear terrain profile (floors + sloped cliff walls).
+	# Allow a projectile originating on the exact surface y == surface_y to launch upward into open air,
+	# while still blocking any segment starting strictly inside solid ground or touching/crossing terrain.
+	if from_pos.y > _terrain_surface_y_at(from_pos.x) + 0.001:
 		return true
-	for edge_x in _get_terrain_step_edges():
-		if (from_pos.x - edge_x) * (to_pos.x - edge_x) > 0.0 or is_equal_approx(from_pos.x, to_pos.x):
-			continue
-		var t: float = (float(edge_x) - from_pos.x) / (to_pos.x - from_pos.x)
-		var hit_y := lerpf(from_pos.y, to_pos.y, t)
-		var wall_top_y := minf(_ground_y_at(edge_x - 1.0), _ground_y_at(edge_x + 1.0))
-		if hit_y >= wall_top_y:
-			return true
+	if to_pos.y >= _terrain_surface_y_at(to_pos.x):
+		return true
+	var specs := _get_terrain_step_specs()
+	if specs.is_empty():
+		return false
+	var dx := to_pos.x - from_pos.x
+	if absf(dx) <= 0.0001:
+		return maxf(from_pos.y, to_pos.y) >= _terrain_surface_y_at(from_pos.x)
+	var min_sx := minf(from_pos.x, to_pos.x)
+	var max_sx := maxf(from_pos.x, to_pos.x)
+	for spec in specs:
+		var drop_x := float(spec["drop_x"])
+		var wall_x := float(spec["wall_x"])
+		var upper_y := float(spec["upper_y"])
+		var lower_y := float(spec["lower_y"])
+		if drop_x > min_sx and drop_x < max_sx:
+			var t_drop := (drop_x - from_pos.x) / dx
+			var y_drop := lerpf(from_pos.y, to_pos.y, t_drop)
+			if y_drop >= upper_y:
+				return true
+		if wall_x > min_sx and wall_x < max_sx:
+			var t_wall := (wall_x - from_pos.x) / dx
+			var y_wall := lerpf(from_pos.y, to_pos.y, t_wall)
+			if y_wall >= lower_y:
+				return true
 	return false
 
 
@@ -1288,15 +1692,14 @@ func _can_cross_terrain_step(from_x: float, to_x: float, foot_y: float, flying: 
 	var min_x := minf(from_x, to_x)
 	var max_x := maxf(from_x, to_x)
 	var clearance := 0.0 if flying else 2.0
-	for edge_x in _get_terrain_step_edges():
-		if min_x < edge_x and max_x >= edge_x:
-			var left_y := _ground_y_at(edge_x - 1.0)
-			var right_y := _ground_y_at(edge_x + 1.0)
-			var moving_uphill := (to_x < from_x and left_y < right_y) or (to_x > from_x and right_y < left_y)
-			if moving_uphill:
-				var upper_y := minf(left_y, right_y)
-				if foot_y > upper_y - clearance:
-					return false
+	for spec in _get_terrain_step_specs():
+		var drop_x := float(spec["drop_x"])
+		var upper_y := float(spec["upper_y"])
+		var wall_x := _step_wall_x_at_y(spec, foot_y)
+		var guard_x := wall_x + 52.0 if not flying else wall_x
+		if to_x < from_x and min_x <= guard_x and max_x >= drop_x:
+			if foot_y > upper_y - clearance:
+				return false
 	return true
 
 
@@ -1311,23 +1714,31 @@ func _resolve_terrain_horizontal_move(from_x: float, raw_target_x: float, foot_y
 	if is_equal_approx(from_x, target_x):
 		return target_x
 	var clearance := 0.0 if flying else 2.0
-	var wall_pad := 0.0 if flying else clampf(body_half_w * 0.25, 0.0, 24.0)
-	var edges := _get_terrain_step_edges()
+	var base_pad := 0.0 if flying else clampf(body_half_w * 0.65, 14.0, 48.0)
+	var specs := _get_terrain_step_specs()
 	if target_x < from_x:
-		for i in range(edges.size() - 1, -1, -1):
-			var edge_x := edges[i]
-			var left_y := _ground_y_at(edge_x - 1.0)
-			var right_y := _ground_y_at(edge_x + 1.0)
-			if left_y < right_y and foot_y > left_y - clearance:
-				var stop_x := (edge_x + wall_pad) if from_x >= edge_x + wall_pad else edge_x
-				if from_x >= edge_x and target_x < stop_x:
-					target_x = maxf(target_x, stop_x)
+		for i in range(specs.size() - 1, -1, -1):
+			var spec: Dictionary = specs[i]
+			var drop_x := float(spec["drop_x"])
+			var upper_y := float(spec["upper_y"])
+			var lower_y := float(spec["lower_y"])
+			if foot_y > upper_y - clearance:
+				var wall_x_at_foot := _step_wall_x_at_y(spec, foot_y)
+				var height_ratio := clampf((foot_y - upper_y) / maxf(1.0, lower_y - upper_y), 0.25, 1.0)
+				var eff_pad := base_pad * height_ratio
+				var wall_stop_x := wall_x_at_foot + eff_pad
+				if from_x >= wall_stop_x and target_x < wall_stop_x:
+					target_x = maxf(target_x, wall_stop_x)
+				elif from_x >= drop_x and target_x < from_x and from_x < wall_stop_x:
+					target_x = from_x
 	else:
-		for edge_x in edges:
-			var left_y := _ground_y_at(edge_x - 1.0)
-			var right_y := _ground_y_at(edge_x + 1.0)
+		# Left-facing uphill checks remain no-op for right-descending rocky plateau steps.
+		for spec in specs:
+			var edge_x := float(spec["drop_x"])
+			var left_y := float(spec["upper_y"])
+			var right_y := float(spec["lower_y"])
 			if right_y < left_y and foot_y > right_y - clearance:
-				var stop_x := (edge_x - wall_pad) if from_x <= edge_x - wall_pad else (edge_x - 0.01)
+				var stop_x := (edge_x - base_pad) if from_x <= edge_x - base_pad else (edge_x - 0.01)
 				if from_x < edge_x and target_x > stop_x:
 					target_x = minf(target_x, stop_x)
 	return clampf(target_x, min_bound, max_bound)
@@ -1508,7 +1919,7 @@ func _try_start_player_jump(jump_pressed: bool, drop_pressed: bool) -> bool:
 		return false
 	var px := player_node.position.x
 	var prev_y := player_node.position.y
-	if drop_pressed and prev_y < _ground_y_at(px) - 4.0:
+	if drop_pressed and not terrain_platforms.is_empty() and prev_y < _ground_y_at(px) - 4.0:
 		_player_drop_timer_s = 0.22
 		player_node.position.y = prev_y + 2.0
 		return false
@@ -1557,6 +1968,16 @@ func _integrate_player_vertical(delta: float, jumped: bool = false) -> Dictionar
 		player_node.position.y = next_y
 		player_vy += gravity_px_per_s2 * delta
 		_prev_player_on_ground = false
+
+	# Keep descending fighters clear of painted cliff faces instead of landing inside [drop_x..wall_x].
+	var post_y := player_node.position.y
+	if not jumped and player_vy >= 0.0:
+		for spec in _get_terrain_step_specs():
+			var drop_x := float(spec["drop_x"])
+			var upper_y := float(spec["upper_y"])
+			var clear_x := _step_wall_x_at_y(spec, post_y) + 6.0
+			if post_y > upper_y + 10.0 and player_node.position.x >= drop_x and player_node.position.x < clear_x:
+				player_node.position.x = minf(walkable_max_x, clear_x)
 
 	return {
 		"y": player_node.position.y,
@@ -1716,8 +2137,6 @@ func select_character(char_id: String) -> bool:
 	player_node.name = "PlayerFighter"
 	var spawn_y := _get_entry_flight_y(entry) if _is_flying_entry(entry) else ground_y
 	_configure_fighter_instance(player_node, player_spawn_x, spawn_y, false, char_scale)
-	if touch_hud != null and is_instance_valid(touch_hud):
-		touch_hud.set_jump_available(_is_flying_entry(entry) or _has_clip_name(player_node, &"jump"), _is_flying_entry(entry))
 
 	var target_enemy := enemy_character_id if (_enemy_pinned and not enemy_character_id.is_empty()) else char_id
 	if not select_enemy_character(target_enemy, false):
@@ -1762,6 +2181,8 @@ func select_enemy_character(char_id: String, pin_enemy: bool = true) -> bool:
 	if player_node != null and dummy_node.get_index() > player_node.get_index():
 		parent_layer.move_child(dummy_node, player_node.get_index())
 	dummy_node.name = "SparringDummy"
+	if char_id == "drum" and "external_orb_managed" in dummy_node:
+		dummy_node.set("external_orb_managed", true)
 	var enemy_spawn_y := _get_entry_flight_y(entry) if _is_flying_entry(entry) else ground_y
 	_configure_fighter_instance(dummy_node, dummy_spawn_x, enemy_spawn_y, true, enemy_scale)
 	enemy_facing_left = dummy_node.scale.x < 0.0
@@ -2097,7 +2518,7 @@ func _spawn_drum_enemy_orb() -> void:
 	_enemy_orb_sprite.play(&"electric_orb_fx")
 
 
-func _step_enemy_orb_projectile(delta: float, pw: float, _ph: float) -> void:
+func _step_enemy_orb_projectile(delta: float, pw: float, ph: float) -> void:
 	if not _enemy_orb_active or not is_instance_valid(_enemy_orb_sprite):
 		return
 	_enemy_orb_elapsed_s += maxf(0.0, delta)
@@ -2105,7 +2526,10 @@ func _step_enemy_orb_projectile(delta: float, pw: float, _ph: float) -> void:
 	_enemy_orb_sprite.position.x += _enemy_orb_dir * (18.0 * 60.0 * enemy_scale) * maxf(0.0, delta)
 	var terrain_hit := terrain_blocks_segment(prev_pos, _enemy_orb_sprite.position)
 	var hit_x := absf(_enemy_orb_sprite.position.x - player_node.position.x) <= maxf(24.0, pw * char_scale * 0.45)
-	if terrain_hit or hit_x or _enemy_orb_elapsed_s >= 0.65:
+	var body_h := maxf(32.0, ph * char_scale)
+	var player_mid_y := player_node.position.y - body_h * 0.5
+	var hit_y := absf(_enemy_orb_sprite.position.y - player_mid_y) <= body_h * 0.55 + 24.0
+	if terrain_hit or (hit_x and hit_y) or _enemy_orb_elapsed_s >= 0.65:
 		_enemy_orb_active = false
 		_enemy_orb_sprite.visible = false
 		_enemy_orb_sprite.stop()
@@ -2487,6 +2911,13 @@ func _flush_player_queued_action() -> void:
 	if not _is_fighter_turning(player_node) and not _is_player_action_playing() and player_node.has_meta(&"_arena_queued_action"):
 		var queued_action := String(player_node.get_meta(&"_arena_queued_action"))
 		player_node.remove_meta(&"_arena_queued_action")
+		if field_mode_enabled and field_manager != null and field_manager.active:
+			if queued_action == "power_up":
+				field_manager.request_player_power_up()
+				return
+			elif queued_action == "attack_heavy":
+				field_manager.request_player_heavy_action()
+				return
 		_request_player_action(queued_action)
 
 
@@ -2673,6 +3104,8 @@ func _physics_process(delta: float) -> void:
 				if field_mode_enabled and field_manager != null and field_manager.active:
 					if aname == "attack_light":
 						field_manager.request_player_primary_action()
+					elif aname == "attack_heavy":
+						field_manager.request_player_heavy_action()
 					elif aname == "power_up":
 						field_manager.request_player_power_up()
 					else:
@@ -2687,8 +3120,6 @@ func _physics_process(delta: float) -> void:
 			dir -= 1
 		if mobile_pad != null and is_instance_valid(mobile_pad) and mobile_pad.analog_dir_x != 0:
 			dir = clampi(mobile_pad.analog_dir_x, -1, 1)
-		elif touch_hud != null and is_instance_valid(touch_hud) and int(touch_hud.get("touch_dir_x")) != 0:
-			dir = clampi(int(touch_hud.get("touch_dir_x")), -1, 1)
 		var is_run := Input.is_key_pressed(KEY_SHIFT)
 
 		var fly_dir_y := 0
@@ -2698,8 +3129,6 @@ func _physics_process(delta: float) -> void:
 			fly_dir_y += 1
 		if mobile_pad != null and is_instance_valid(mobile_pad) and _is_flying_entry(_find_character_entry_ro(active_character_id)) and mobile_pad.analog_dir_y != 0:
 			fly_dir_y = clampi(mobile_pad.analog_dir_y, -1, 1)
-		elif touch_hud != null and is_instance_valid(touch_hud) and int(touch_hud.get("touch_dir_y")) != 0:
-			fly_dir_y = clampi(int(touch_hud.get("touch_dir_y")), -1, 1)
 
 		var jump_req := Input.is_key_pressed(KEY_W) or Input.is_key_pressed(KEY_SPACE) or Input.is_key_pressed(KEY_UP) or Input.is_action_pressed(&"jump")
 		var drop_req := Input.is_key_pressed(KEY_S) or Input.is_key_pressed(KEY_DOWN) or Input.is_action_pressed(&"move_down")
@@ -2719,6 +3148,9 @@ func _physics_process(delta: float) -> void:
 		_sync_field_pad_state()
 	elif utility_ai_enabled:
 		step_utility_ai(delta)
+
+	if alpha_session_active:
+		step_alpha_network(delta, 0)
 
 	_step_ground_dust(delta)
 	_update_parallax_scroll()
@@ -2819,7 +3251,7 @@ func _is_point_over_hud_controls(screen_pos: Vector2) -> bool:
 		return true
 	if mobile_pad != null and is_instance_valid(mobile_pad) and bool(mobile_pad.call("is_screen_point_over_pad", screen_pos)):
 		return true
-	for ctrl in [summon_button, wish_panel, item_toggle_button, item_drop_test_button, item_pickup_button, pixel_perfect_button, toggle_hero_button, pad_settings_button, toggle_ui_button, immortal_button, monster_range_button]:
+	for ctrl in [summon_button, wish_panel, item_toggle_button, item_drop_test_button, item_pickup_button, pixel_perfect_button, toggle_hero_button, pad_settings_button, toggle_ui_button, immortal_button, monster_range_button, boss_spawn_button]:
 		if ctrl != null and is_instance_valid(ctrl) and (ctrl as Control).visible:
 			if (ctrl as Control).get_global_rect().has_point(screen_pos):
 				return true
@@ -2889,8 +3321,8 @@ func _draw_pixel_contact_shadow(pos_x: float, pos_y: float, body_w: float, scale
 	var cfg: Dictionary = terrain_config.get("contact_shadow", {})
 	var outer: Array = cfg.get("outer_rgba", [35, 22, 16, 60])
 	var inner: Array = cfg.get("inner_rgba", [24, 14, 10, 85])
-	var sec_left := MAP_LEFT_X
-	var sec_right := MAP_RIGHT_X
+	var sec_left := _map_left_x
+	var sec_right := _map_right_x
 	for sec in _get_terrain_sections():
 		var sl := float(sec["left_x"])
 		var sr := float(sec["right_x"])
@@ -2911,8 +3343,8 @@ func _draw_pixel_contact_shadow(pos_x: float, pos_y: float, body_w: float, scale
 func _draw_ruler_overlay() -> void:
 	var font := ThemeDB.fallback_font
 	if ruler_grid_enabled:
-		var start_x := int(MAP_LEFT_X)
-		var end_x := int(MAP_RIGHT_X)
+		var start_x := int(_map_left_x)
+		var end_x := int(_map_right_x)
 		for wx in range(start_x, end_x + 1, 100):
 			var fx := float(wx)
 			var major := (wx % 200 == 0)
@@ -2921,7 +3353,7 @@ func _draw_ruler_overlay() -> void:
 			if major and font != null:
 				draw_string(font, Vector2(fx + 3.0, gy + 24.0), "%d" % wx, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(0.72, 0.92, 1.0, 0.9))
 		for edge_x in _get_terrain_step_edges():
-			draw_line(Vector2(edge_x, MAP_TOP_Y), Vector2(edge_x, MAP_BOTTOM_Y), Color(0.98, 0.45, 0.09, 0.7), 2.0)
+			draw_line(Vector2(edge_x, _map_top_y), Vector2(edge_x, _map_bottom_y), Color(0.98, 0.45, 0.09, 0.7), 2.0)
 			if font != null:
 				draw_string(font, Vector2(edge_x + 6.0, _ground_y_at(edge_x - 1.0) - 24.0), "STEP %d" % int(round(edge_x)), HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color(1.0, 0.78, 0.45, 0.95))
 	if ruler_has_a:
@@ -2956,7 +3388,7 @@ func _draw() -> void:
 		var e_dims := _get_body_dims(_find_character_entry_ro(enemy_character_id))
 		_draw_pixel_contact_shadow(dummy_node.position.x, dummy_node.position.y, float(e_dims.x), enemy_scale, _is_fighter_surface_visible(dummy_node, enemy_character_id))
 	if field_mode_enabled and field_manager != null and field_manager.active:
-		for slot in field_manager.slots:
+		for slot in field_manager._get_combat_slots():
 			if bool(slot.get("alive", false)):
 				var mnode := slot.get("node") as Node2D
 				if mnode != null and is_instance_valid(mnode):
@@ -3025,8 +3457,18 @@ func _update_hud() -> void:
 			else:
 				var imm_tag := " [BẤT TỬ]" if field_manager.player_immortal else ""
 				hero_txt = "Drum %d/%d HP%s | %d/%d MP (%d,%d)" % [int(round(field_manager.player_hp)), int(round(field_manager.player_max_hp)), imm_tag, int(round(field_manager.player_mana)), int(round(field_manager.player_max_mana)), px, py]
-		hud_label.text = "%dx%d | FPS %d/60 | Quái: %d/%d | %s | Ngọc: %d" % [
-			int(round(vis.x)), int(round(vis.y)), Engine.get_frames_per_second(), alive_cnt, field_manager.slots.size(), hero_txt, collected_bag_balls.size()
+		var boss_txt := ""
+		var bslot: Dictionary = field_manager.boss_slot
+		if not bslot.is_empty() and bool(bslot.get("alive", false)):
+			boss_txt = " | Boss Drum: %d/%d HP" % [int(round(float(bslot.get("hp", 0.0)))), int(round(float(bslot.get("max_hp", 5000.0))))]
+		elif field_manager.boss_has_spawned_once:
+			boss_txt = " | Boss hồi: %.0fs" % field_manager.boss_respawn_timer_s
+		elif field_manager.player_spawned:
+			boss_txt = " | Boss: %.0fs" % field_manager.boss_spawn_timer_s
+		else:
+			boss_txt = " | Boss: Chờ Tướng (5')"
+		hud_label.text = "%dx%d | FPS %d/60 | Quái: %d/%d | %s%s | Ngọc: %d" % [
+			int(round(vis.x)), int(round(vis.y)), Engine.get_frames_per_second(), alive_cnt, field_manager.slots.size(), hero_txt, boss_txt, collected_bag_balls.size()
 		]
 	else:
 		hud_label.text = "%dx%d | %s | %.2fx Nearest (%dx%dpx, %.1f%% 1080p) | FPS: %d/60 | Speed: %d px/s | Pos: (%d, %d) | [1/2/3/-/+] Scale%s" % [
@@ -3063,11 +3505,11 @@ func _ensure_item_drop_layer() -> Node2D:
 	if _item_drop_layer == null or not is_instance_valid(_item_drop_layer):
 		_item_drop_layer = Node2D.new()
 		_item_drop_layer.name = "ItemDropsLayer"
-		_item_drop_layer.z_index = 50
+		_item_drop_layer.z_index = 45
 		_item_drop_layer.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 		add_child(_item_drop_layer)
 	else:
-		_item_drop_layer.z_index = 50
+		_item_drop_layer.z_index = 45
 	_item_drop_layer.visible = item_drop_enabled
 	return _item_drop_layer
 
@@ -3130,6 +3572,7 @@ func trigger_monster_death_drop(ball_num: int = 0) -> Node2D:
 	var roll_dir := -1.0 if px <= spawn_pos.x else 1.0
 	var item := DragonBallItemScene.instantiate() as Node2D
 	item.set("ball_number", n)
+	item.set("ground_y_resolver", Callable(self, "_ground_y_at"))
 	if item.has_signal("collected"):
 		item.connect("collected", _on_dropped_item_collected)
 	layer.add_child(item)

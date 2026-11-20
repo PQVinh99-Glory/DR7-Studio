@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://b8hqljqcjo685"
-path="res://.godot/imported/combined.png-39f60bd0a3c4fd3b30119ddf83b75595.ctex"
+uid="uid://cn2moivckalgr"
+path="res://.godot/imported/login_bg.png-21c557423ae76f8d209eda290bbf0cc7.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://review/rocky_plateau_extension/combined.png"
-dest_files=["res://.godot/imported/combined.png-39f60bd0a3c4fd3b30119ddf83b75595.ctex"]
+source_file="res://assets/ui/login/login_bg.png"
+dest_files=["res://.godot/imported/login_bg.png-21c557423ae76f8d209eda290bbf0cc7.ctex"]
 
 [params]
 

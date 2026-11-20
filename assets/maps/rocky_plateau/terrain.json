@@ -55,6 +55,20 @@
     "alpha_hardness_pct": 100.0
   },
   "platforms": [],
+  "extended_steps": [
+    {"index": 1, "drop_x": 2850, "wall_x": 2876, "drop_y": 50},
+    {"index": 2, "drop_x": 3695, "wall_x": 3724, "drop_y": 105},
+    {"index": 3, "drop_x": 4740, "wall_x": 4778, "drop_y": 135},
+    {"index": 4, "drop_x": 5560, "wall_x": 5582, "drop_y": 190}
+  ],
+  "extended_backdrop": {
+    "path": "assets/maps/rocky_plateau/rocky-plateau-extended-4steps.png",
+    "res_path": "res://assets/maps/rocky_plateau/rocky-plateau-extended-4steps.png",
+    "sha256": "e9ff4be801640a82b56e538b7981d7b4ba132f406b39298e111eb9c5e2adc1b1",
+    "foreground_trees_path": "assets/maps/rocky_plateau/rocky-plateau-foreground-trees.png",
+    "foreground_trees_res_path": "res://assets/maps/rocky_plateau/rocky-plateau-foreground-trees.png",
+    "foreground_trees_sha256": "74dc207da6e4650f2f10c19d1a9d122a8008782015a1fba1bcc63372d24ea494"
+  },
   "contact_shadow": {
     "style": "dynamic_pixel_rect",
     "ellipse_forbidden": true,

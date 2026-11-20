@@ -1,0 +1,16 @@
+name = "dr7-alpha-staging"
+main = "src/worker.js"
+compatibility_date = "2026-11-01"
+workers_dev = true
+
+[[r2_buckets]]
+binding = "ARTIFACTS"
+bucket_name = "dr7-alpha-artifacts"
+
+[[durable_objects.bindings]]
+name = "ZONE_ROOMS"
+class_name = "ZoneRoomDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ZoneRoomDO"]

@@ -1,7 +1,7 @@
 class_name NetworkTransport
 extends RefCounted
 ## Abstract transport boundary (D5 / ADR-0001).
-## Phase 1 uses WebSocketTransport (wss:// compatible with Cloudflare Free Proxy & WAF VN/JP block).
+## Phase 1 uses WebSocketTransport (wss:// compatible with Cloudflare Free Proxy; WAF hard-blocks JP 100%, blocks VN search/download while keeping Game Client/Server OPEN for VN).
 ## Later APK/VPS UDP deployments can swap in an ENetTransport implementation without touching gameplay code.
 
 signal connected(session_info: Dictionary)

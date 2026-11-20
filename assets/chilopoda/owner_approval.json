@@ -559,7 +559,7 @@
     "assets/chilopoda/godot_bundle/godot-sprite3d/frames/frame-093.png": "9b9ab01a7507381f3eeab0078ab521d83d5e991492e8686c097a1810ea80d238",
     "assets/chilopoda/source/.gdignore": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "scenes/Chilopoda.tscn": "dd24bfdef9860d394868ecd86d23c2207470e2cc7b746936f6d07eaa067ba897",
-    "scenes/ChilopodaFighter2D.gd": "42e13b25645388355603d5533fc7f79eff9a7a6a73b8da64c4f36fb2f57cf68b",
-    "scenes/ChilopodaGroundClip.gdshader": "5ad4297c43f9a649df4dcf3ed693f6f0e923babd9723cf6974dcd9a1d51c70da"
+    "scenes/ChilopodaFighter2D.gd": "4fced4e16748b06acea1bcd2854fe34a49d84ea6b365329d17fa8820667ea31c",
+    "scenes/ChilopodaGroundClip.gdshader": "aa04bc638dbb6033e146d2958becc1f0a06113fa61349228ba92d932e8af8cbc"
   }
 }

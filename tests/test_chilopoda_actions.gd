@@ -80,6 +80,24 @@ func run_test() -> void:
 		if fighter.fireball_sprite.visible or hits.size() != 1 or str(hits[0][0]) != "fireball" or int(hits[0][1]) != 250:
 			fail("fireball did not disappear/emit single 250 hit: visible=%s hits=%s" % [str(fighter.fireball_sprite.visible), str(hits)])
 			return
+	# Verify scaled burrow relocation (scale=2.0) lands bite point exactly at target_ground_global.
+	for sign_s in [1.0, -1.0]:
+		fighter.global_position = Vector2(100.0, 0.0)
+		fighter.scale = Vector2(sign_s * 2.0, 2.0)
+		var scaled_target_x: float = 100.0 + sign_s * 256.0
+		fighter.set_combat_target_global(Vector2(scaled_target_x, 0.0))
+		fighter.play_clip(&"attack_light")
+		body.pause()
+		hits.clear()
+		fighter.render_action_tick("attack_light", 69.0)
+		var expected_pos_x: float = 100.0 + sign_s * 160.0 # dx=80 local * scale=2.0 => 160 world px
+		if absf(fighter.global_position.x - expected_pos_x) > 0.01:
+			fail("scaled burrow relocation mismatch: expected=%.2f got=%.2f" % [expected_pos_x, fighter.global_position.x])
+			return
+		if hits.size() != 1 or absf((hits[0][2] as Vector2).x - scaled_target_x) > 0.01:
+			fail("scaled burrow bite hit point mismatch: expected=%.2f hits=%s" % [scaled_target_x, str(hits)])
+			return
+	fighter.scale = Vector2(1.0, 1.0)
 	# Burrow turn commits facing only during the fully hidden interval, at both endpoints.
 	fighter.scale.x = 1.0
 	fighter.global_position = Vector2(7, 0)

@@ -60,7 +60,22 @@ target/
 /work/characters/chilopoda/atlas-v1/stage-surface-turn-baseline/
 /work/characters/chilopoda/atlas-v1/live-surface-turn-baseline/
 
+# Local secrets and credentials (NEVER track or bundle)
+.env
+.env.*
+!.env.example
+
 # Generated local exports & scratch / legacy work demos (Owner D6: purged after approval)
 /build/
 /work/
 /.forge/
+**/.wrangler/
+**/node_modules/
+
+# Root Owner reference images (kept locally on disk; never committed or packed into builds)
+/image.png
+/image.png.import
+/image copy.png
+/image copy.png.import
+/image copy 2.png
+/image copy 2.png.import

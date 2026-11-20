@@ -6,18 +6,23 @@ extends Node
 
 signal player_state_changed()
 signal pointer_changed(kind: String)
+signal combat_action_emitted(action_kind: String, target_id: String, target_kind: String, origin_pos: Vector2, facing_left: bool)
+signal player_pve_damage_emitted(damage: float, new_hp: float, alive: bool)
 
 const UtilityAIControllerScript := preload("res://scenes/UtilityAIController.gd")
 const OverheadBarsDrawScript := preload("res://scenes/runtime/OverheadBarsDraw.gd")
 const PowerupExplosionFrames := preload("res://assets/fx/powerup_explosion/powerup_explosion.tres")
 
-const RESPAWN_MONSTER_DELAY_S := 7.0
+const RESPAWN_MONSTER_DELAY_S := 12.0
 const RESPAWN_PLAYER_DELAY_S := 3.0
+const BOSS_DRUM_INITIAL_DELAY_S := 300.0 # 5 minutes after hero exists in map
+const BOSS_DRUM_RESPAWN_DELAY_S := 1800.0 # 30 minutes cooldown after Boss Drum is defeated
 const MINI_STUN_DURATION_S := 3.0
 const STAMINA_PER_HIT := 20.0
 const PLAYER_MAX_HP := 1500.0
 const PLAYER_MAX_MANA := 100.0
 const PLAYER_LIGHT_DMG := 200.0
+const PLAYER_HEAVY_DMG := 320.0
 const PLAYER_POWER_DMG := 400.0
 const PLAYER_MANA_GAIN := 20.0
 const ITEM_PICKUP_UNLOCK_S := 1.0
@@ -32,6 +37,8 @@ const DEFAULT_EXPLOSION_SCALE := 0.68
 const CLASH_EXPLOSION_SCALE := 0.58
 const HIT_FLASH_BRIGHTNESS_MUL := 0.64
 const HIT_FLASH_ALPHA_MUL := 0.80
+const HIT_FLASH_CONTRAST_MUL := 0.60
+const HIT_FLASH_BRIGHTNESS_BOOST := 1.40
 const HIT_SHAKE_SCALE_MUL := 0.80
 const POINTER_X_SHOW_DURATION_S := 0.75
 
@@ -44,6 +51,18 @@ const DRAGON_BALL_DROP_TABLE := [
 	{"ball": 3, "weight": 2.0},
 	{"ball": 2, "weight": 0.5},
 	{"ball": 1, "weight": 0.1},
+]
+
+const BOSS_DRUM_STATS := {"hp": 5000.0, "stamina": 200.0, "light_dmg": 120.0, "heavy_dmg": 120.0, "power_dmg": 220.0, "flying": false}
+
+const BOSS_DROP_TABLE := [
+	{"ball": 1, "weight": 8.0},
+	{"ball": 2, "weight": 12.0},
+	{"ball": 3, "weight": 18.0},
+	{"ball": 4, "weight": 22.0},
+	{"ball": 5, "weight": 20.0},
+	{"ball": 6, "weight": 12.0},
+	{"ball": 7, "weight": 8.0},
 ]
 
 const MONSTER_STATS := {
@@ -76,6 +95,19 @@ var _player_power_pending: bool = false
 var _player_power_target: Dictionary = {}
 
 var slots: Array[Dictionary] = []
+var boss_slot: Dictionary = {}
+var remote_player_slots: Dictionary = {}
+var local_display_name: String = ""
+var network_authoritative: bool = false
+var _local_hp_grace_s: float = 0.0
+var _local_mana_grace_s: float = 0.0
+var _last_srv_local_hp: float = -1.0
+var _last_srv_local_mana: float = -1.0
+var _slot_local_hit_grace: Dictionary = {}
+var boss_has_spawned_once: bool = false
+var boss_spawn_timer_s: float = BOSS_DRUM_INITIAL_DELAY_S
+var boss_respawn_timer_s: float = 0.0
+var _boss_teleport_chase_cd_s: float = 0.0
 var homing_projectiles: Array[Dictionary] = []
 var _flying_rotation_idx: int = 0
 var _sim_time_s: float = 0.0
@@ -104,19 +136,49 @@ var player_hit_shake_s: float = 0.0
 var hit_impacts: Array[Dictionary] = []
 var floating_texts: Array[Dictionary] = []
 var _explosion_nodes: Array[AnimatedSprite2D] = []
+var _fx_frames_cache: Dictionary = {}
 
 
 func setup(owner_arena: Node2D) -> void:
 	arena = owner_arena
 
 
+func _get_combat_slots() -> Array[Dictionary]:
+	var out: Array[Dictionary] = []
+	for s in slots:
+		out.append(s)
+	if not boss_slot.is_empty():
+		out.append(boss_slot)
+	for rp_val in remote_player_slots.values():
+		if rp_val is Dictionary:
+			out.append(rp_val)
+	return out
+
+
+static func _get_slot_stats(slot: Dictionary) -> Dictionary:
+	if bool(slot.get("is_boss", false)):
+		return BOSS_DRUM_STATS
+	return MONSTER_STATS.get(str(slot.get("character_id", "")), {})
+
+
 func clear_all() -> void:
 	active = false
-	for s in slots:
+	for s in _get_combat_slots():
 		var n := s.get("node") as Node2D
 		if n != null and is_instance_valid(n):
 			n.queue_free()
 	slots.clear()
+	boss_slot = {}
+	remote_player_slots.clear()
+	_local_hp_grace_s = 0.0
+	_local_mana_grace_s = 0.0
+	_last_srv_local_hp = -1.0
+	_last_srv_local_mana = -1.0
+	_slot_local_hit_grace.clear()
+	boss_has_spawned_once = false
+	boss_spawn_timer_s = BOSS_DRUM_INITIAL_DELAY_S
+	boss_respawn_timer_s = 0.0
+	_boss_teleport_chase_cd_s = 0.0
 	for pr in homing_projectiles:
 		var sp := pr.get("sprite") as Node2D
 		if sp != null and is_instance_valid(sp):
@@ -164,30 +226,35 @@ func start_field(spawn_player_immediately: bool = false) -> void:
 	player_respawn_timer_s = 0.0
 	_flying_rotation_idx = 0
 
-	# 5 Ground slots (3 on main plateau matching 870px green oval spacing ~800px + 1 each on steps 2 & 3)
+	# 3 main-plateau slots and 1 ground monster on each of the 4 lower plateaus.
 	var ground_defs := [
 		{"id": "g0", "cid": "chilopoda", "x": 330.0, "zmin": -103.0, "zmax": 766.0},
 		{"id": "g1", "cid": "spinosaurus", "x": 1160.0, "zmin": 730.0, "zmax": 1590.0},
 		{"id": "g2", "cid": "tasmanian_king_crab", "x": 1990.0, "zmin": 1560.0, "zmax": 2430.0},
 		{"id": "g3", "cid": "t_rex", "x": 3270.0, "zmin": 2900.0, "zmax": 3640.0},
 		{"id": "g4", "cid": "sarcosuchus", "x": 4125.0, "zmin": 3750.0, "zmax": 4490.0},
+		{"id": "g5", "cid": "dilophosaurus", "x": 5180.0, "zmin": 4790.0, "zmax": 5500.0},
+		{"id": "g6", "cid": "spinosaurus", "x": 5960.0, "zmin": 5610.0, "zmax": 6310.0},
 	]
 	for gd in ground_defs:
 		_create_and_spawn_slot(gd, false)
 
-	# 5 Flying slots aligned above the 5 areas (wide red aggro ~1057px from Screenshot 131900)
+	# One flying monster above each ground slot and lower plateau.
 	var flying_defs := [
 		{"id": "f0", "cid": "bat_chiroptera", "x": 330.0, "y": 240.0, "zmin": -190.0, "zmax": 855.0},
 		{"id": "f1", "cid": "pteranodon", "x": 1160.0, "y": 240.0, "zmin": 635.0, "zmax": 1685.0},
 		{"id": "f2", "cid": "floating_camera", "x": 1990.0, "y": 240.0, "zmin": 1465.0, "zmax": 2515.0},
 		{"id": "f3", "cid": "bat_chiroptera", "x": 3270.0, "y": 260.0, "zmin": 2745.0, "zmax": 3795.0},
 		{"id": "f4", "cid": "pteranodon", "x": 4125.0, "y": 280.0, "zmin": 3600.0, "zmax": 4540.0},
+		{"id": "f5", "cid": "floating_camera", "x": 5180.0, "y": 300.0, "zmin": 4740.0, "zmax": 5560.0},
+		{"id": "f6", "cid": "bat_chiroptera", "x": 5960.0, "y": 320.0, "zmin": 5560.0, "zmax": 6360.0},
 	]
 	for fd in flying_defs:
 		_create_and_spawn_slot(fd, true)
 
-	_flying_rotation_idx = 2 # Next rotating respawn after initial Bat/Ptera/Cam/Bat/Ptera continues cleanly
+	_flying_rotation_idx = 1 # Continue Bat/Ptera/Camera rotation after 7 initial flying slots.
 	refresh_pointer_valid()
+
 	player_state_changed.emit()
 
 
@@ -266,23 +333,25 @@ func _spawn_slot_monster(slot: Dictionary, cid: String) -> void:
 	parent_layer.add_child(inst)
 	inst.name = "FieldMob_%s_%s" % [str(slot["id"]), cid]
 
-	var sc := float(arena.call("_get_entry_default_scale", entry))
+	var is_boss := bool(slot.get("is_boss", false))
+	var sc := float(slot.get("boss_scale", 2.5)) if is_boss else float(arena.call("_get_entry_default_scale", entry))
 	var spawn_x := float(slot["x_home"])
 	var spawn_y := float(slot["y_home"]) if bool(slot["is_flying"]) else float(arena.call("_ground_y_at", spawn_x))
 	arena.call("_configure_fighter_instance", inst, spawn_x, spawn_y, true, sc)
 	inst.z_index = int(arena.call("get_fighter_layer_z", cid, false))
 
 	var caps: Dictionary = arena.call("_resolve_enemy_capabilities", entry, inst)
-	var st: Dictionary = MONSTER_STATS.get(cid, {"hp": 1300.0})
-	var max_hp := float(st.get("hp", 1300.0))
-
 	slot["node"] = inst
 	slot["character_id"] = cid
+	var st: Dictionary = _get_slot_stats(slot)
+	var max_hp := float(st.get("hp", 1300.0))
+	var max_stam := float(st.get("stamina", 100.0))
+
 	slot["alive"] = true
 	slot["hp"] = max_hp
 	slot["max_hp"] = max_hp
-	slot["stamina"] = 100.0
-	slot["max_stamina"] = 100.0
+	slot["stamina"] = max_stam
+	slot["max_stamina"] = max_stam
 	slot["stun_timer_s"] = 0.0
 	slot["hit_anim_timer_s"] = 0.0
 	slot["respawn_timer_s"] = 0.0
@@ -296,6 +365,7 @@ func _spawn_slot_monster(slot: Dictionary, cid: String) -> void:
 	slot["facing_left"] = inst.scale.x < 0.0
 	slot["power_released"] = false
 	slot["melee_hit_done"] = false
+	slot["teleport_relocated"] = false
 	slot["has_heavy"] = bool(caps.get("has_heavy", false))
 	slot["has_power_up"] = bool(caps.get("has_power_up", false))
 	slot["light_clip"] = str(caps.get("light_clip", "attack_light"))
@@ -306,21 +376,41 @@ func _spawn_slot_monster(slot: Dictionary, cid: String) -> void:
 	slot["turn_lock_s"] = 0.0
 	slot["hit_flash_s"] = 0.0
 	slot["hit_shake_s"] = 0.0
+	if is_boss:
+		inst.name = "FieldBoss_drum"
+		inst.z_index = int(arena.Z_LAYER_BOSS)
 
-	# Disable legacy horizontal prefab ProjectileFX in Field Mode so only 1 clean 360-degree projectile fires
+	# Disable legacy horizontal prefab ProjectileFX & Drum internal orb in Field Mode so only 1 clean 360-degree projectile fires
 	if inst.get("external_projectile_managed") != null:
 		inst.set("external_projectile_managed", true)
+	if inst.get("external_orb_managed") != null:
+		inst.set("external_orb_managed", true)
 	var pfx := inst.get_node_or_null("ProjectileFX") as Node2D
 	if pfx != null:
 		pfx.visible = false
 		pfx.modulate = Color(1.0, 1.0, 1.0, 0.0)
 		pfx.scale = Vector2.ZERO
+	var ffx := inst.get_node_or_null("FireballFX") as AnimatedSprite2D
+	if ffx != null:
+		ffx.visible = false
+		ffx.modulate = Color(1.0, 1.0, 1.0, 0.0)
+		ffx.sprite_frames = null
 
 
 func step(delta: float) -> void:
 	if not active or delta <= 0.0:
 		return
 	_sim_time_s += delta
+	if _local_hp_grace_s > 0.0:
+		_local_hp_grace_s = maxf(0.0, _local_hp_grace_s - delta)
+	if _local_mana_grace_s > 0.0:
+		_local_mana_grace_s = maxf(0.0, _local_mana_grace_s - delta)
+	for gkey in _slot_local_hit_grace.keys():
+		var rem := float(_slot_local_hit_grace[gkey]) - delta
+		if rem <= 0.0:
+			_slot_local_hit_grace.erase(gkey)
+		else:
+			_slot_local_hit_grace[gkey] = rem
 
 	# 1. Player respawn, auto-approach, & pending attack/power release
 	if player_spawned and player_dead:
@@ -332,9 +422,12 @@ func step(delta: float) -> void:
 		_step_auto_approach(delta)
 		_step_player_combat_hooks()
 
-	# 2. Step all 10 monster slots
+	# 2. Step Boss Map schedule + all active monster slots + Boss Drum
+	_step_boss_spawn_schedule(delta)
 	for slot in slots:
 		_step_slot(slot, delta)
+	if not boss_slot.is_empty():
+		_step_slot(boss_slot, delta)
 
 	# 3. Step homing projectiles (silhouette collision + skill-vs-skill clash + terrain stop)
 	_step_homing_projectiles(delta)
@@ -342,13 +435,275 @@ func step(delta: float) -> void:
 	# 4. Apply hit flashes, shakes, pointer fade & impact/text timers immediately after combat updates
 	_step_hit_visuals(delta)
 
-	# 5. Tick dropped item ages (for 1s pickup delay)
-	for item_n in arena._dropped_item_nodes:
-		if is_instance_valid(item_n):
-			var age := float(item_n.get_meta(&"drop_age_s", 0.0)) + delta
-			item_n.set_meta(&"drop_age_s", age)
+	# 5. Tick dropped item ages (for 1s pickup delay) & prune collected item nodes to avoid leak
+	for i in range(arena._dropped_item_nodes.size() - 1, -1, -1):
+		var item_n := arena._dropped_item_nodes[i] as Node2D
+		if item_n == null or not is_instance_valid(item_n):
+			arena._dropped_item_nodes.remove_at(i)
+			continue
+		if str(item_n.get("lifecycle_state")) == "collected":
+			arena._dropped_item_nodes.remove_at(i)
+			item_n.queue_free()
+			continue
+		var age := float(item_n.get_meta(&"drop_age_s", 0.0)) + delta
+		item_n.set_meta(&"drop_age_s", age)
 
 	refresh_pointer_valid()
+
+
+func _step_boss_spawn_schedule(delta: float) -> void:
+	if arena == null or not active:
+		return
+	if not boss_slot.is_empty() and bool(boss_slot.get("alive", false)):
+		boss_respawn_timer_s = 0.0
+		return
+	var hero_present := player_spawned and arena.player_node != null and is_instance_valid(arena.player_node)
+	if not boss_has_spawned_once:
+		if not hero_present:
+			boss_spawn_timer_s = BOSS_DRUM_INITIAL_DELAY_S
+			return
+		if not player_dead:
+			boss_spawn_timer_s = maxf(0.0, boss_spawn_timer_s - delta)
+			if boss_spawn_timer_s <= 0.0:
+				spawn_boss_drum()
+		return
+	if boss_respawn_timer_s > 0.0:
+		boss_respawn_timer_s = maxf(0.0, boss_respawn_timer_s - delta)
+	if boss_respawn_timer_s <= 0.0 and hero_present and not player_dead:
+		spawn_boss_drum()
+
+
+func _pick_random_boss_spawn_x(min_x: float, max_x: float) -> float:
+	var lo := min_x + 40.0
+	var hi := max_x - 40.0
+	if hi <= lo:
+		return (min_x + max_x) * 0.5
+	return randf_range(lo, hi)
+
+
+func spawn_boss_drum(forced_spawn_x: float = -999999.0) -> Dictionary:
+	if arena == null:
+		return {}
+	if not boss_slot.is_empty() and bool(boss_slot.get("alive", false)) and is_instance_valid(boss_slot.get("node")):
+		# Never double-spawn while alive; re-trigger entry teleport onto hero if desired for test.
+		if player_spawned and not player_dead and arena.player_node != null:
+			var existing_ai := boss_slot.get("ai") as UtilityAIController
+			if existing_ai != null:
+				existing_ai.set_meta(&"drum_engaged", true)
+				existing_ai.set_meta(&"drum_phase", "post_teleport_light")
+			_start_slot_attack(boss_slot, "teleport", 0.0)
+		return boss_slot
+
+	var drum_entry: Dictionary = arena.call("_find_character_entry_ro", "drum")
+	if drum_entry.is_empty():
+		return {}
+	var boss_bounds: Vector2 = arena.call("_get_fighter_walk_bounds_x", drum_entry, 2.5)
+	var spawn_x := forced_spawn_x
+	if spawn_x < -900000.0:
+		spawn_x = _pick_random_boss_spawn_x(boss_bounds.x, boss_bounds.y)
+	else:
+		spawn_x = clampf(spawn_x, boss_bounds.x, boss_bounds.y)
+
+	var ai := UtilityAIControllerScript.new()
+	if arena.stage_config is Dictionary:
+		ai.configure_from_stage(arena.stage_config)
+	ai.reset_zone((boss_bounds.x + boss_bounds.y) * 0.5, boss_bounds.x, boss_bounds.y, true)
+
+	# Free any previous dead/stale Boss Drum node before replacing boss_slot (prevents node leak).
+	var stale_boss_node := boss_slot.get("node") as Node2D
+	if stale_boss_node != null and is_instance_valid(stale_boss_node):
+		if stale_boss_node.get_parent() != null:
+			stale_boss_node.get_parent().remove_child(stale_boss_node)
+		stale_boss_node.queue_free()
+
+	boss_slot = {
+		"id": "boss_drum",
+		"native_cid": "drum",
+		"character_id": "drum",
+		"is_flying": false,
+		"is_boss": true,
+		"boss_scale": 2.5,
+		"ai": ai,
+		"x_home": spawn_x,
+		"y_home": float(arena.call("_ground_y_at", spawn_x)),
+		"zone_min_x": boss_bounds.x,
+		"zone_max_x": boss_bounds.y,
+		"respawn_toggle": false,
+		"node": null,
+		"alive": false,
+		"hp": float(BOSS_DRUM_STATS["hp"]),
+		"max_hp": float(BOSS_DRUM_STATS["hp"]),
+		"stamina": float(BOSS_DRUM_STATS["stamina"]),
+		"max_stamina": float(BOSS_DRUM_STATS["stamina"]),
+		"stun_timer_s": 0.0,
+		"hit_anim_timer_s": 0.0,
+		"respawn_timer_s": 0.0,
+		"ko_hide_timer_s": 0.0,
+		"cooldown_s": 0.0,
+		"light_chain": 0,
+		"action_clip": "",
+		"action_timer_s": 0.0,
+		"vy": 0.0,
+		"scale_val": 2.5,
+		"facing_left": true,
+		"patrol_dir": -1,
+		"patrol_pause_s": 0.0,
+		"power_released": false,
+		"melee_hit_done": false,
+		"teleport_relocated": false,
+		"has_heavy": false,
+		"has_power_up": true,
+		"light_clip": "attack_light",
+		"locomotion_clip": "walk",
+		"preserve_phase": false,
+		"sideways_locked": false,
+		"turn_boost_s": 0.0,
+		"turn_elapsed_s": 0.0,
+		"turn_duration_s": 0.0,
+		"turn_prev_dir": 1,
+		"turn_target_left": true,
+		"turn_lock_s": 0.0,
+		"has_turn_clip": false,
+		"orbit_phase": 0.0,
+		"orbit_dir": -1.0,
+		"hit_flash_s": 0.0,
+		"hit_shake_s": 0.0,
+	}
+	_spawn_slot_monster(boss_slot, "drum")
+	boss_has_spawned_once = true
+	boss_spawn_timer_s = 0.0
+	boss_respawn_timer_s = 0.0
+	_boss_teleport_chase_cd_s = 2.0
+
+	if player_spawned and not player_dead and arena.player_node != null:
+		var bnode := boss_slot.get("node") as Node2D
+		if bnode != null:
+			var want_left: bool = arena.player_node.position.x < bnode.position.x
+			boss_slot["facing_left"] = want_left
+			bnode.scale = Vector2(-2.5 if want_left else 2.5, 2.5)
+		ai.set_meta(&"drum_engaged", true)
+		ai.set_meta(&"drum_phase", "post_teleport_light")
+		_start_slot_attack(boss_slot, "teleport", 0.0)
+	refresh_pointer_valid()
+	return boss_slot
+
+
+func _execute_boss_teleport_relocation(slot: Dictionary) -> void:
+	var mnode := slot.get("node") as Node2D
+	if mnode == null or not is_instance_valid(mnode) or arena == null or arena.player_node == null:
+		return
+	var px: float = arena.player_node.position.x
+	var hero_floor_y := float(arena.call("_ground_y_at", px))
+	var p_rect := _get_player_body_rect()
+	var b_rect := _get_slot_body_rect(slot)
+	var pw := p_rect.size.x if p_rect.size.x > 0.0 else 44.0 * float(arena.char_scale)
+	var bw := b_rect.size.x if b_rect.size.x > 0.0 else 56.0 * float(slot["scale_val"])
+	var target_dist := (pw + bw) * 0.5 + 36.0
+	var side := -1.0 if mnode.position.x <= px else 1.0
+	var min_b := float(slot["zone_min_x"])
+	var max_b := float(slot["zone_max_x"])
+	var entry: Dictionary = arena.call("_find_character_entry_ro", str(slot["character_id"]))
+	var dims: Vector2i = arena.call("_get_body_dims", entry)
+	var half_w := (float(dims.x) * float(slot["scale_val"]) * 0.5) if dims.x > 0 else (56.0 * float(slot["scale_val"]))
+
+	var primary_x := float(arena.call("_resolve_terrain_horizontal_move", px, px + side * target_dist, hero_floor_y, false, min_b, max_b, half_w))
+	var chosen_x := primary_x
+	if absf(primary_x - px) < maxf(24.0, target_dist * 0.45):
+		var alt_x := float(arena.call("_resolve_terrain_horizontal_move", px, px - side * target_dist, hero_floor_y, false, min_b, max_b, half_w))
+		if absf(alt_x - px) > absf(primary_x - px):
+			chosen_x = alt_x
+	mnode.position.x = chosen_x
+	mnode.position.y = float(arena.call("_ground_y_at", chosen_x))
+	slot["vy"] = 0.0
+	var want_left := px < mnode.position.x
+	var sc := float(slot["scale_val"])
+	slot["facing_left"] = want_left
+	mnode.scale = Vector2(-sc if want_left else sc, sc)
+
+
+func _step_boss_drum_ai(slot: Dictionary, delta: float) -> void:
+	var mnode := slot.get("node") as Node2D
+	if mnode == null or not is_instance_valid(mnode):
+		return
+	_boss_teleport_chase_cd_s = maxf(0.0, _boss_teleport_chase_cd_s - delta)
+	var ai := slot.get("ai") as UtilityAIController
+	if ai != null:
+		ai.tick_cooldown(delta)
+
+	if not player_spawned or player_dead or arena.player_node == null or not is_instance_valid(arena.player_node):
+		if ai != null and ai.has_method("reset_drum_state"):
+			ai.reset_drum_state()
+		_step_slot_patrol(slot, delta)
+		return
+
+	var can_counter_attack := float(slot["stun_timer_s"]) <= 0.0
+	var px: float = arena.player_node.position.x
+	var py: float = arena.player_node.position.y
+	var self_rect := _get_slot_body_rect(slot)
+	var target_rect := _get_player_body_rect()
+	var res: Dictionary = {}
+	if ai != null and can_counter_attack:
+		res = ai.evaluate({
+			"character_id": "drum",
+			"is_flying": false,
+			"is_stationary": false,
+			"has_heavy": false,
+			"has_power_up": true,
+			"light_clip": "attack_light",
+			"self_rect": self_rect,
+			"target_rect": target_rect,
+			"self_x": mnode.position.x,
+			"target_x": px,
+			"facing_left": mnode.scale.x < 0.0,
+			"is_busy": false,
+		})
+
+	var dx_p := px - mnode.position.x
+	if absf(dx_p) > 12.0:
+		var want_left: bool = bool(res.get("desired_face_left", dx_p < 0.0))
+		if (mnode.scale.x < 0.0) != want_left:
+			var sc := float(slot["scale_val"])
+			slot["facing_left"] = want_left
+			mnode.scale = Vector2(-sc if want_left else sc, sc)
+
+	var intent := str(res.get("intent", "idle"))
+	var dy := absf(py - mnode.position.y)
+	var edge_dist := float(res.get("edge_dist", _compute_slot_edge_gap(slot)))
+
+	if can_counter_attack and intent == "attack":
+		var clip := str(res.get("attack_clip", "attack_light"))
+		if clip == "attack_light" and dy > 110.0 and _boss_teleport_chase_cd_s <= 0.0:
+			if ai != null:
+				ai.set_meta(&"drum_engaged", true)
+				ai.set_meta(&"drum_phase", "post_teleport_light")
+			_boss_teleport_chase_cd_s = 2.0
+			_start_slot_attack(slot, "teleport", 0.0)
+			return
+		_start_slot_attack(slot, clip, 0.0)
+		return
+	elif intent == "wait_cooldown" or (not can_counter_attack and edge_dist <= 50.0):
+		arena.call("_ensure_fighter_locomotion", mnode, "idle", bool(slot["preserve_phase"]))
+		return
+
+	# Hero moved past 400px UtilityAI engagement range or high vertical elevation: global map pursuit!
+	if can_counter_attack and (_boss_teleport_chase_cd_s <= 0.0 or (dy > 110.0 and edge_dist >= 200.0)):
+		if ai != null:
+			ai.set_meta(&"drum_engaged", true)
+			ai.set_meta(&"drum_phase", "post_teleport_light")
+		_boss_teleport_chase_cd_s = 2.0
+		_start_slot_attack(slot, "teleport", 0.0)
+		return
+
+	var move_dir := -1 if px < mnode.position.x else 1
+	var entry: Dictionary = arena.call("_find_character_entry_ro", "drum")
+	var spd := float(arena.call("_get_walk_speed_px_per_s", entry, float(slot["scale_val"])))
+	var dims: Vector2i = arena.call("_get_body_dims", entry)
+	var moved := float(arena.call("_move_node_horizontal", mnode, float(move_dir) * spd * delta, false, float(slot["zone_min_x"]), float(slot["zone_max_x"]), float(dims.x) * float(slot["scale_val"]) * 0.5))
+	if absf(moved) < 0.5 and py < mnode.position.y - 24.0:
+		var fl_y := float(arena.call("_ground_y_at", mnode.position.x))
+		if mnode.position.y >= fl_y - 1.0:
+			slot["vy"] = -740.0
+	arena.call("_ensure_fighter_locomotion", mnode, "walk", bool(slot["preserve_phase"]))
 
 
 func respawn_player_at_left() -> void:
@@ -356,6 +711,9 @@ func respawn_player_at_left() -> void:
 	player_hp = player_max_hp
 	player_mana = 0.0
 	player_respawn_timer_s = 0.0
+	_local_hp_grace_s = 0.45
+	_local_mana_grace_s = 0.45
+	player_pve_damage_emitted.emit(0.0, player_hp, true)
 	player_hit_flash_s = 0.0
 	player_hit_shake_s = 0.0
 	_player_melee_pending = false
@@ -475,17 +833,21 @@ func _step_player_combat_hooks() -> void:
 	var pspr := arena.player_node.get_node_or_null("Sprite") as AnimatedSprite2D
 	if pspr == null:
 		return
+	var queued_act := String(arena.player_node.get_meta(&"_arena_queued_action", ""))
 	if _player_melee_pending:
-		if String(pspr.animation) == "attack_light" and pspr.frame >= 2:
+		var anim_str := String(pspr.animation)
+		var is_melee_anim := (anim_str == "attack_light" or anim_str == "attack_heavy" or anim_str == "attack_nomal")
+		var melee_queued := (queued_act == "attack_light" or queued_act == "attack_heavy" or queued_act == "attack_nomal")
+		if is_melee_anim and pspr.frame >= 2:
 			_player_melee_pending = false
-			_execute_player_melee_hit()
-		elif String(pspr.animation) != "attack_light":
+			_execute_player_melee_hit("heavy" if anim_str == "attack_heavy" else "melee")
+		elif not is_melee_anim and not melee_queued:
 			_player_melee_pending = false
 	if _player_power_pending:
 		if String(pspr.animation) == "power_up" and pspr.frame >= 10:
 			_player_power_pending = false
 			_launch_player_homing_orb()
-		elif String(pspr.animation) != "power_up":
+		elif String(pspr.animation) != "power_up" and queued_act != "power_up":
 			_player_power_pending = false
 
 
@@ -493,6 +855,7 @@ func request_player_primary_action() -> bool:
 	if not player_spawned or player_dead or arena.player_node == null:
 		return false
 	refresh_pointer_valid()
+
 	if pointer_kind == "item" and pointer_item_node != null and is_instance_valid(pointer_item_node):
 		if _can_pickup_item(pointer_item_node) and arena.player_node.position.distance_to(pointer_item_node.position) <= ITEM_PICKUP_RANGE_PX:
 			cancel_auto_approach()
@@ -539,6 +902,20 @@ func request_player_primary_action() -> bool:
 	return false
 
 
+func request_player_heavy_action() -> bool:
+	if not player_spawned or player_dead or arena.player_node == null:
+		return false
+	cancel_auto_approach()
+	var tgt := _resolve_player_attack_target(false)
+	if not tgt.is_empty():
+		var m_core := _get_slot_core_pos(tgt)
+		_face_player_toward_x(m_core.x)
+	if bool(arena.call("_request_player_action", "attack_heavy")):
+		_player_melee_pending = true
+		return true
+	return false
+
+
 func request_player_power_up() -> bool:
 	if not player_spawned or player_dead or arena.player_node == null:
 		return false
@@ -552,10 +929,15 @@ func request_player_power_up() -> bool:
 	if mnode != null and is_instance_valid(mnode):
 		_face_player_toward_x(mnode.position.x)
 	if bool(arena.call("_request_player_action", "power_up")):
-		player_mana = maxf(0.0, player_mana - 100.0)
-		_player_power_pending = true
-		_player_power_target = tgt
-		player_state_changed.emit()
+		var pspr := arena.player_node.get_node_or_null("Sprite") as AnimatedSprite2D
+		var queued_act := String(arena.player_node.get_meta(&"_arena_queued_action", ""))
+		var started_now := pspr != null and String(pspr.animation) == "power_up" and pspr.is_playing() and queued_act != "power_up"
+		if started_now:
+			player_mana = maxf(0.0, player_mana - 100.0)
+			_local_mana_grace_s = 0.85
+			_player_power_pending = true
+			_player_power_target = tgt
+			player_state_changed.emit()
 		return true
 	return false
 
@@ -568,7 +950,7 @@ func _compute_contact_edge_point(rect_a: Rect2, rect_b: Rect2) -> Vector2:
 	return Vector2(hx, hy)
 
 
-func _execute_player_melee_hit() -> void:
+func _execute_player_melee_hit(hit_kind: String = "melee") -> void:
 	var tgt := _resolve_player_attack_target(false)
 	if tgt.is_empty():
 		return
@@ -580,7 +962,20 @@ func _execute_player_melee_hit() -> void:
 		return
 	var p_core := _get_player_core_pos()
 	var hit_pt: Vector2 = arena.call("compute_nearest_silhouette_point", tgt["node"], str(tgt["character_id"]), float(tgt["scale_val"]), p_core)
-	apply_damage_to_slot(tgt, PLAYER_LIGHT_DMG, STAMINA_PER_HIT, hit_pt, "melee")
+	var hit_dir := (hit_pt - p_core).normalized() if hit_pt.distance_to(p_core) > 1.0 else Vector2(-1.0 if arena.player_node.scale.x < 0.0 else 1.0, 0.0)
+	var dmg := PLAYER_HEAVY_DMG if hit_kind == "heavy" else PLAYER_LIGHT_DMG
+	var is_remote_p := bool(tgt.get("is_remote_player", false))
+	var tgt_id := str(tgt.get("user_id", tgt.get("id", ""))) if is_remote_p else str(tgt.get("id", ""))
+	_local_mana_grace_s = 0.45
+	if not is_remote_p:
+		_slot_local_hit_grace[tgt_id] = 0.45
+	combat_action_emitted.emit("attack_heavy" if hit_kind == "heavy" else "attack_light", tgt_id, "player" if is_remote_p else "monster", arena.player_node.position, arena.player_node.scale.x < 0.0)
+	if network_authoritative and is_remote_p:
+		_spawn_hit_impact_fx(hit_pt, hit_kind, "", Color(1.0, 0.92, 0.28, 1.0), hit_dir)
+		player_mana = minf(player_max_mana, player_mana + PLAYER_MANA_GAIN)
+		player_state_changed.emit()
+		return
+	apply_damage_to_slot(tgt, dmg, STAMINA_PER_HIT, hit_pt, hit_kind, false, hit_dir)
 	player_mana = minf(player_max_mana, player_mana + PLAYER_MANA_GAIN)
 	player_state_changed.emit()
 
@@ -593,7 +988,11 @@ func _launch_player_homing_orb() -> void:
 		return
 	var dir_x: float = -1.0 if arena.player_node.scale.x < 0.0 else 1.0
 	var start_pos: Vector2 = arena.player_node.position + Vector2(42.0 * dir_x * float(arena.char_scale), -28.0 * float(arena.char_scale))
-	_spawn_homing_projectile(arena.player_node, "drum", "electric_orb_fx", start_pos, float(arena.char_scale), tgt, true, PLAYER_POWER_DMG, STAMINA_PER_HIT)
+	var cid: String = str(arena.active_character_id) if not str(arena.active_character_id).is_empty() else "drum"
+	var fx_clip := _resolve_fx_clip_for_character(cid)
+	if fx_clip.is_empty():
+		fx_clip = "electric_orb_fx"
+	_spawn_homing_projectile(arena.player_node, cid, fx_clip, start_pos, float(arena.char_scale), tgt, true, PLAYER_POWER_DMG, STAMINA_PER_HIT)
 
 
 func _spawn_powerup_explosion(world_pos: Vector2, scale_val: float = 0.85) -> void:
@@ -618,9 +1017,30 @@ func _spawn_powerup_explosion(world_pos: Vector2, scale_val: float = 0.85) -> vo
 	)
 
 
-func _spawn_hit_impact_fx(world_pos: Vector2, kind: String, dmg_text: String, text_col: Color) -> void:
-	var dur := 0.24 if (kind == "skill" or kind == "stun" or kind == "clash") else 0.18
-	hit_impacts.append({"pos": world_pos, "kind": kind, "elapsed_s": 0.0, "duration_s": dur})
+func _resolve_custom_hit_impact_frames(attacker_cid: String) -> SpriteFrames:
+	if attacker_cid.is_empty() or arena == null:
+		return null
+	var entry: Dictionary = arena.call("_find_character_entry_ro", attacker_cid)
+	var rc: Dictionary = entry.get("render_contract", {}) if entry.get("render_contract", {}) is Dictionary else {}
+	var custom_path := str(rc.get("custom_hit_impact_tres", "")).strip_edges()
+	if custom_path.is_empty():
+		return null
+	var cache_key := "hit_impact:%s" % custom_path
+	if _fx_frames_cache.has(cache_key):
+		return _fx_frames_cache[cache_key] as SpriteFrames
+	if ResourceLoader.exists(custom_path):
+		var loaded := load(custom_path) as SpriteFrames
+		if loaded != null:
+			_fx_frames_cache[cache_key] = loaded
+			return loaded
+	return null
+
+
+func _spawn_hit_impact_fx(world_pos: Vector2, kind: String, dmg_text: String, text_col: Color, impact_dir: Vector2 = Vector2.RIGHT, attacker_cid: String = "") -> void:
+	var dur := 0.30 if kind == "heavy" else (0.24 if (kind == "melee" or kind == "skill" or kind == "stun" or kind == "clash") else 0.18)
+	var d_norm := impact_dir.normalized() if impact_dir.length_squared() > 0.001 else Vector2.RIGHT
+	var custom_frames: SpriteFrames = _resolve_custom_hit_impact_frames(attacker_cid)
+	hit_impacts.append({"pos": world_pos, "kind": kind, "dir": d_norm, "elapsed_s": 0.0, "duration_s": dur, "custom_frames": custom_frames})
 	if not dmg_text.is_empty():
 		floating_texts.append({
 			"pos": world_pos + Vector2(0.0, -16.0),
@@ -640,11 +1060,20 @@ static func _apply_hit_flash_modulate(spr: AnimatedSprite2D, flash_active: bool,
 	var base := Color(1.0, 0.24, 0.24, 1.0) if blink else Color(1.0, 0.94, 0.94, 0.72)
 	if not is_hero:
 		base = Color(1.0, 0.35, 0.28, 1.0) if blink else Color(1.0, 0.96, 0.75, 0.75)
-	spr.modulate = Color(
+	var raw_flash := Color(
 		base.r * HIT_FLASH_BRIGHTNESS_MUL,
 		base.g * HIT_FLASH_BRIGHTNESS_MUL,
 		base.b * HIT_FLASH_BRIGHTNESS_MUL,
 		base.a * HIT_FLASH_ALPHA_MUL
+	)
+	# Reduce hit-flash/blink contrast by 40%, then lift brightness by +40% (Owner human-test request 2026-11-19)
+	# so heroes/monsters stay bright and visually legible instead of darkening on hit.
+	var blended := Color.WHITE.lerp(raw_flash, HIT_FLASH_CONTRAST_MUL)
+	spr.modulate = Color(
+		minf(1.35, blended.r * HIT_FLASH_BRIGHTNESS_BOOST),
+		minf(1.35, blended.g * HIT_FLASH_BRIGHTNESS_BOOST),
+		minf(1.35, blended.b * HIT_FLASH_BRIGHTNESS_BOOST),
+		blended.a
 	)
 
 
@@ -667,7 +1096,7 @@ func _step_hit_visuals(delta: float) -> void:
 				_apply_hit_flash_modulate(pspr, player_hit_flash_s > 0.0, pblink, true)
 				var shake_amp := (1.2 * HIT_SHAKE_SCALE_MUL) / maxf(1.0, float(arena.char_scale))
 				pspr.position.x = sin(_sim_time_s * 75.0) * shake_amp if player_hit_shake_s > 0.0 else 0.0
-	for s in slots:
+	for s in _get_combat_slots():
 		var hf := float(s.get("hit_flash_s", 0.0))
 		var hs := float(s.get("hit_shake_s", 0.0))
 		if hf > 0.0 or hs > 0.0:
@@ -712,12 +1141,20 @@ func _trigger_slot_single_hit_anim(slot: Dictionary) -> void:
 	slot["hit_anim_timer_s"] = maxf(0.18, hit_dur)
 
 
-func apply_damage_to_slot(slot: Dictionary, dmg: float, stamina_dmg: float = STAMINA_PER_HIT, hit_pos: Vector2 = Vector2(-99999.0, -99999.0), hit_kind: String = "melee", spawn_power_explosion: bool = false) -> void:
+func apply_damage_to_slot(slot: Dictionary, dmg: float, stamina_dmg: float = STAMINA_PER_HIT, hit_pos: Vector2 = Vector2(-99999.0, -99999.0), hit_kind: String = "melee", spawn_power_explosion: bool = false, impact_dir: Vector2 = Vector2.RIGHT) -> void:
 	if slot.is_empty() or not bool(slot.get("alive", false)):
+		return
+	if network_authoritative and bool(slot.get("is_remote_player", false)):
+		var rfx_pos := hit_pos if hit_pos.x > -90000.0 else _get_slot_core_pos(slot)
+		slot["hit_flash_s"] = 0.16
+		slot["hit_shake_s"] = 0.10 * HIT_SHAKE_SCALE_MUL
+		if spawn_power_explosion:
+			_spawn_powerup_explosion(rfx_pos, DEFAULT_EXPLOSION_SCALE)
+		_spawn_hit_impact_fx(rfx_pos, hit_kind, "", Color(0.40, 0.94, 1.0, 1.0), impact_dir)
 		return
 	var fx_pos := hit_pos if hit_pos.x > -90000.0 else _get_slot_core_pos(slot)
 	var dmg_lbl := "-%d%s" % [int(round(dmg)), "!" if hit_kind == "skill" else ""]
-	var dmg_col := Color(0.40, 0.94, 1.0, 1.0) if hit_kind == "skill" else Color(1.0, 0.92, 0.28, 1.0)
+	var dmg_col := Color(0.40, 0.94, 1.0, 1.0) if hit_kind == "skill" else (Color(1.0, 0.56, 0.22, 1.0) if hit_kind == "heavy" else Color(1.0, 0.92, 0.28, 1.0))
 	slot["hit_flash_s"] = 0.16
 	slot["hit_shake_s"] = 0.14 * HIT_SHAKE_SCALE_MUL
 	if spawn_power_explosion:
@@ -725,7 +1162,7 @@ func apply_damage_to_slot(slot: Dictionary, dmg: float, stamina_dmg: float = STA
 
 	slot["hp"] = maxf(0.0, float(slot["hp"]) - dmg)
 	if float(slot["hp"]) <= 0.0:
-		_spawn_hit_impact_fx(fx_pos, hit_kind, dmg_lbl, dmg_col)
+		_spawn_hit_impact_fx(fx_pos, hit_kind, dmg_lbl, dmg_col, impact_dir)
 		_kill_slot_monster(slot)
 		return
 	var broke_stun := false
@@ -740,9 +1177,10 @@ func apply_damage_to_slot(slot: Dictionary, dmg: float, stamina_dmg: float = STA
 		# Broken stamina window active: 1 incoming hit = 1 HIT clip (0 hits when unattacked).
 		_trigger_slot_single_hit_anim(slot)
 	if broke_stun:
-		_spawn_hit_impact_fx(fx_pos, "stun", "%s CHOÁNG!" % dmg_lbl, Color(1.0, 0.68, 0.15, 1.0))
+		var stun_kind := hit_kind if (hit_kind == "melee" or hit_kind == "heavy") else "stun"
+		_spawn_hit_impact_fx(fx_pos, stun_kind, "%s CHOÁNG!" % dmg_lbl, Color(1.0, 0.68, 0.15, 1.0), impact_dir, str(arena.active_character_id) if arena != null else "")
 	else:
-		_spawn_hit_impact_fx(fx_pos, hit_kind, dmg_lbl, dmg_col)
+		_spawn_hit_impact_fx(fx_pos, hit_kind, dmg_lbl, dmg_col, impact_dir, str(arena.active_character_id) if arena != null else "")
 
 
 func set_player_immortal(enabled: bool) -> void:
@@ -758,7 +1196,7 @@ func set_player_immortal(enabled: bool) -> void:
 	player_state_changed.emit()
 
 
-func apply_damage_to_player(dmg: float, hit_pos: Vector2 = Vector2(-99999.0, -99999.0), spawn_power_explosion: bool = false) -> void:
+func apply_damage_to_player(dmg: float, hit_pos: Vector2 = Vector2(-99999.0, -99999.0), spawn_power_explosion: bool = false, hit_kind: String = "player_hit", impact_dir: Vector2 = Vector2.RIGHT, attacker_cid: String = "") -> void:
 	if not player_spawned or player_dead:
 		return
 	if player_immortal:
@@ -766,10 +1204,11 @@ func apply_damage_to_player(dmg: float, hit_pos: Vector2 = Vector2(-99999.0, -99
 	var fx_pos := hit_pos if hit_pos.x > -90000.0 else _get_player_core_pos()
 	player_hit_flash_s = 0.19
 	player_hit_shake_s = 0.09 * HIT_SHAKE_SCALE_MUL
-	_spawn_hit_impact_fx(fx_pos, "player_hit", "-%d" % int(round(dmg)), Color(1.0, 0.28, 0.28, 1.0))
+	_spawn_hit_impact_fx(fx_pos, hit_kind, "-%d" % int(round(dmg)), Color(1.0, 0.28, 0.28, 1.0), impact_dir, attacker_cid)
 	if spawn_power_explosion:
 		_spawn_powerup_explosion(fx_pos, DEFAULT_EXPLOSION_SCALE)
 	player_hp = maxf(0.0, player_hp - dmg)
+	_local_hp_grace_s = 0.45
 	# Owner rule: Player does NOT suffer HIT animation/interrupt
 	if player_hp <= 0.0:
 		player_dead = true
@@ -778,17 +1217,24 @@ func apply_damage_to_player(dmg: float, hit_pos: Vector2 = Vector2(-99999.0, -99
 		_player_power_pending = false
 		cancel_auto_approach()
 		if arena.player_node != null:
+			if arena.player_node.has_meta(&"_arena_queued_action"):
+				arena.player_node.remove_meta(&"_arena_queued_action")
 			arena.call("_play_fighter_clip", arena.player_node, "ko")
+	player_pve_damage_emitted.emit(dmg, player_hp, not player_dead)
 	player_state_changed.emit()
 
 
 func _kill_slot_monster(slot: Dictionary) -> void:
+	var is_boss := bool(slot.get("is_boss", false))
 	slot["alive"] = false
 	slot["stun_timer_s"] = 0.0
 	slot["action_clip"] = ""
 	slot["action_timer_s"] = 0.0
-	slot["respawn_timer_s"] = RESPAWN_MONSTER_DELAY_S
+	slot["respawn_timer_s"] = BOSS_DRUM_RESPAWN_DELAY_S if is_boss else RESPAWN_MONSTER_DELAY_S
 	slot["ko_hide_timer_s"] = 0.75
+	if is_boss:
+		boss_respawn_timer_s = BOSS_DRUM_RESPAWN_DELAY_S
+		boss_spawn_timer_s = 0.0
 	if _auto_approach_slot_id == str(slot.get("id", "")):
 		cancel_auto_approach()
 	var mnode := slot.get("node") as Node2D
@@ -796,11 +1242,23 @@ func _kill_slot_monster(slot: Dictionary) -> void:
 	if mnode != null and is_instance_valid(mnode):
 		drop_pos = mnode.position
 		arena.call("_play_fighter_clip", mnode, "ko")
-	roll_and_spawn_dragon_ball(drop_pos)
+	roll_and_spawn_dragon_ball(drop_pos, -1.0, -1.0, is_boss)
 	refresh_pointer_valid()
 
 
-func roll_dragon_ball_number(gate_roll_0_to_100: float = -1.0, star_roll_0_to_table: float = -1.0) -> int:
+
+func roll_dragon_ball_number(gate_roll_0_to_100: float = -1.0, star_roll_0_to_table: float = -1.0, is_boss: bool = false) -> int:
+	if is_boss:
+		var b_total := 0.0
+		for row in BOSS_DROP_TABLE:
+			b_total += float(row["weight"])
+		var br := randf() * b_total if star_roll_0_to_table < 0.0 else star_roll_0_to_table
+		var b_acc := 0.0
+		for row in BOSS_DROP_TABLE:
+			b_acc += float(row["weight"])
+			if br < b_acc:
+				return int(row["ball"])
+		return int(BOSS_DROP_TABLE[BOSS_DROP_TABLE.size() - 1]["ball"])
 	var gate := randf() * 100.0 if gate_roll_0_to_100 < 0.0 else gate_roll_0_to_100
 	# First gate: 30% total chance to drop any Dragon Ball item
 	if gate >= DRAGON_BALL_TOTAL_DROP_PCT:
@@ -818,19 +1276,21 @@ func roll_dragon_ball_number(gate_roll_0_to_100: float = -1.0, star_roll_0_to_ta
 	return int(DRAGON_BALL_DROP_TABLE[DRAGON_BALL_DROP_TABLE.size() - 1]["ball"])
 
 
-func roll_and_spawn_dragon_ball(world_pos: Vector2, forced_gate_roll: float = -1.0, forced_star_roll: float = -1.0) -> Node2D:
-	var ball_num := roll_dragon_ball_number(forced_gate_roll, forced_star_roll)
+func roll_and_spawn_dragon_ball(world_pos: Vector2, forced_gate_roll: float = -1.0, forced_star_roll: float = -1.0, is_boss: bool = false) -> Node2D:
+	var ball_num := roll_dragon_ball_number(forced_gate_roll, forced_star_roll, is_boss)
 	if ball_num <= 0:
 		return null
 	arena.item_drop_enabled = true
+	arena.call("_sync_item_toggle_button")
 	var layer: Node2D = arena.call("_ensure_item_drop_layer")
-	layer.z_index = 50 # Top layer: never occluded by player or monsters
+	layer.z_index = 45 # Above FightersLayer (10) & Boss (40), below Shenron (52) & FieldOverlayLayer (65)
 	var floor_y := float(arena.call("_ground_y_at", world_pos.x))
 	var px: float = arena.player_node.position.x if arena.player_node != null else world_pos.x - 40.0
 	var roll_dir := -1.0 if px <= world_pos.x else 1.0
 	var item := arena.DragonBallItemScene.instantiate() as Node2D
 	item.set("ball_number", ball_num)
-	item.z_index = 50
+	item.set("ground_y_resolver", Callable(arena, "_ground_y_at"))
+	item.z_index = 0
 	item.set_meta(&"drop_age_s", 0.0)
 	if item.has_signal("collected"):
 		item.connect("collected", arena._on_dropped_item_collected)
@@ -866,6 +1326,8 @@ func _step_slot(slot: Dictionary, delta: float) -> void:
 			slot["ko_hide_timer_s"] = hide_t
 			if hide_t <= 0.0:
 				mnode.visible = false
+		if bool(slot.get("is_boss", false)):
+			return
 		slot["respawn_timer_s"] = float(slot["respawn_timer_s"]) - delta
 		if float(slot["respawn_timer_s"]) <= 0.0:
 			var next_cid := ""
@@ -915,6 +1377,11 @@ func _step_slot(slot: Dictionary, delta: float) -> void:
 		_step_slot_vertical(slot, delta)
 		return
 
+	if bool(slot.get("is_boss", false)):
+		_step_boss_drum_ai(slot, delta)
+		_step_slot_vertical(slot, delta)
+		return
+
 	var has_target := _is_player_in_slot_aggro(slot)
 	if not has_target:
 		if bool(slot["is_flying"]):
@@ -937,10 +1404,15 @@ func _step_slot(slot: Dictionary, delta: float) -> void:
 	var edge_gap := _compute_slot_edge_gap(slot)
 	var cid := str(slot["character_id"])
 	var is_fly := bool(slot["is_flying"])
-	var st: Dictionary = MONSTER_STATS.get(cid, {})
 	var dy_to_player := absf(arena.player_node.position.y - mnode.position.y)
 
-	if edge_gap <= 50.0 and dy_to_player <= 110.0:
+	if cid == "chilopoda":
+		var burrow := edge_gap >= float(arena.ai_controller.close_edge_px)
+		if can_counter_attack and float(slot["cooldown_s"]) <= 0.0:
+			_start_slot_attack(slot, str(slot["light_clip"]) if burrow else "power_up", 0.95 if burrow else 1.45)
+		else:
+			arena.call("_ensure_fighter_locomotion", mnode, "idle", bool(slot["preserve_phase"]))
+	elif edge_gap <= 50.0 and dy_to_player <= 110.0:
 		if can_counter_attack and float(slot["cooldown_s"]) <= 0.0:
 			var use_heavy := bool(slot["has_heavy"]) and int(slot["light_chain"]) >= 2
 			var clip := "attack_heavy" if use_heavy else str(slot["light_clip"])
@@ -1060,11 +1532,19 @@ func _face_slot_toward(slot: Dictionary, want_left: bool) -> void:
 	mnode.scale = Vector2(-sc if want_left else sc, sc)
 
 
+func _get_clamped_slot_target_pos(slot: Dictionary) -> Vector2:
+	if arena == null or arena.player_node == null:
+		return Vector2(float(slot.get("x_home", 0.0)), float(slot.get("y_home", 840.0)))
+	var tx := clampf(arena.player_node.position.x, float(slot.get("zone_min_x", -240.0)), float(slot.get("zone_max_x", 6360.0)))
+	var ty := float(arena.call("_ground_y_at", tx))
+	return Vector2(tx, ty)
+
+
 func _start_slot_attack(slot: Dictionary, clip: String, cd_s: float) -> void:
 	var mnode := slot["node"] as Node2D
 	var cid := str(slot["character_id"])
 	if cid == "chilopoda" and mnode.has_method(&"set_combat_target_global") and arena.player_node != null:
-		mnode.call(&"set_combat_target_global", arena.player_node.position)
+		mnode.call(&"set_combat_target_global", _get_clamped_slot_target_pos(slot))
 	elif cid == "dilophosaurus" and mnode.has_method(&"set_slash_target_global") and arena.player_node != null:
 		mnode.call(&"set_slash_target_global", arena.player_node.position)
 	if bool(arena.call("_play_fighter_clip", mnode, clip)):
@@ -1073,17 +1553,28 @@ func _start_slot_attack(slot: Dictionary, clip: String, cd_s: float) -> void:
 		slot["cooldown_s"] = cd_s
 		slot["power_released"] = false
 		slot["melee_hit_done"] = false
+		slot["teleport_relocated"] = false
 
 
 func _step_slot_action_effects(slot: Dictionary, spr: AnimatedSprite2D, force_resolve: bool = false) -> void:
 	var mnode := slot["node"] as Node2D
 	var cid := str(slot["character_id"])
 	var clip := str(slot["action_clip"])
-	var st: Dictionary = MONSTER_STATS.get(cid, {})
+	var st: Dictionary = _get_slot_stats(slot)
+	if clip == "teleport":
+		if not bool(slot.get("teleport_relocated", false)):
+			var mid_reached := force_resolve or float(slot["action_timer_s"]) <= 0.17 or (spr != null and String(spr.animation) == "teleport" and spr.frame >= 2)
+			if mid_reached:
+				_execute_boss_teleport_relocation(slot)
+				slot["teleport_relocated"] = true
+		return
 	if cid == "dilophosaurus" and clip == "power_up" and mnode.has_method(&"set_slash_target_global") and arena.player_node != null:
 		mnode.call(&"set_slash_target_global", _get_player_core_pos())
 	elif cid == "chilopoda" and clip == "power_up" and mnode.has_method(&"set_combat_target_global") and arena.player_node != null:
-		mnode.call(&"set_combat_target_global", arena.player_node.position)
+		mnode.call(&"set_combat_target_global", _get_clamped_slot_target_pos(slot))
+	elif cid == "chilopoda" and clip == "attack_light":
+		mnode.position.x = clampf(mnode.position.x, float(slot["zone_min_x"]), float(slot["zone_max_x"]))
+		mnode.position.y = float(arena.call("_ground_y_at", mnode.position.x))
 	var is_ranged_power := (clip == "power_up") or (cid == "floating_camera" and clip == "attack_light")
 	if is_ranged_power and not bool(slot["power_released"]):
 		var rel_frame := 2
@@ -1091,15 +1582,21 @@ func _step_slot_action_effects(slot: Dictionary, spr: AnimatedSprite2D, force_re
 			rel_frame = 3
 		elif cid == "floating_camera":
 			rel_frame = 1
+		elif cid == "drum":
+			rel_frame = 10
 		if force_resolve or (spr != null and spr.frame >= rel_frame):
 			slot["power_released"] = true
 			if cid == "dilophosaurus":
-				var p_core := _get_player_core_pos()
-				# Dilophosaurus keeps its dedicated 3-slash target FX without spawning the default explosion.
-				apply_damage_to_player(float(st.get("power_dmg", 100.0)), p_core, false)
+				if arena.player_node != null and player_spawned and not player_dead:
+					var m_core := _get_slot_core_pos(slot)
+					var p_core := _get_player_core_pos()
+					var blocked := bool(arena.call("terrain_blocks_segment", m_core, p_core))
+					if not blocked and m_core.distance_to(p_core) <= 720.0:
+						# Dilophosaurus keeps its dedicated 3-slash target FX without spawning the default explosion.
+						apply_damage_to_player(float(st.get("power_dmg", 100.0)), p_core, false)
 			else:
 				_spawn_slot_homing_power(slot, float(st.get("power_dmg", 100.0)))
-	elif not is_ranged_power and not bool(slot["melee_hit_done"]):
+	elif clip in ["attack_light", "attack_heavy", "attack_nomal"] and not bool(slot["melee_hit_done"]):
 		var melee_frame := 11 if cid == "chilopoda" else 2
 		if force_resolve or (spr != null and spr.frame >= melee_frame):
 			slot["melee_hit_done"] = true
@@ -1108,10 +1605,12 @@ func _step_slot_action_effects(slot: Dictionary, spr: AnimatedSprite2D, force_re
 			var edge := _compute_slot_edge_gap(slot)
 			var v_gap := maxf(0.0, maxf(p_rect.position.y - m_rect.end.y, m_rect.position.y - p_rect.end.y))
 			if edge <= 85.0 and arena.player_node != null and v_gap <= 95.0:
-				var dmg := float(st.get("heavy_dmg", 70.0)) if clip == "attack_heavy" else float(st.get("light_dmg", 50.0))
+				var is_heavy := clip == "attack_heavy"
+				var dmg := float(st.get("heavy_dmg", 70.0)) if is_heavy else float(st.get("light_dmg", 50.0))
 				var m_core := _get_slot_core_pos(slot)
 				var hit_pt: Vector2 = arena.call("compute_nearest_silhouette_point", arena.player_node, arena.active_character_id, arena.char_scale, m_core)
-				apply_damage_to_player(dmg, hit_pt, false)
+				var hit_dir := (hit_pt - m_core).normalized() if hit_pt.distance_to(m_core) > 1.0 else Vector2(-1.0 if mnode.scale.x < 0.0 else 1.0, 0.0)
+				apply_damage_to_player(dmg, hit_pt, false, "heavy" if is_heavy else "melee", hit_dir, cid)
 
 
 func _spawn_slot_homing_power(slot: Dictionary, dmg: float) -> void:
@@ -1123,7 +1622,7 @@ func _spawn_slot_homing_power(slot: Dictionary, dmg: float) -> void:
 	if fx_clip.is_empty():
 		apply_damage_to_player(dmg)
 		return
-	var start_pos := mnode.position + Vector2(dir_x * 46.0 * sc, -48.0 * sc)
+	var start_pos := mnode.position + (Vector2(dir_x * 42.0 * sc, -28.0 * sc) if cid == "drum" else Vector2(dir_x * 46.0 * sc, -48.0 * sc))
 	_spawn_homing_projectile(mnode, cid, fx_clip, start_pos, sc, {}, false, dmg, 0.0)
 
 
@@ -1156,10 +1655,15 @@ func _spawn_homing_projectile(owner_node: Node2D, cid: String, fx_clip: String, 
 	var pivot_arr: Variant = entry.get("render_contract", {}).get("fx_pivot_px", [176.0, 128.0])
 	var pivot := Vector2(float(pivot_arr[0]), float(pivot_arr[1])) if (pivot_arr is Array and pivot_arr.size() >= 2) else Vector2(64.0, 48.0)
 
+	var cache_key := "%s:%s" % [cid, fx_clip]
+	var cached_frames := _fx_frames_cache.get(cache_key) as SpriteFrames
+	if cached_frames == null:
+		cached_frames = spr.sprite_frames.duplicate() as SpriteFrames
+		cached_frames.set_animation_loop(StringName(fx_clip), true)
+		_fx_frames_cache[cache_key] = cached_frames
 	var fx := AnimatedSprite2D.new()
 	fx.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-	fx.sprite_frames = spr.sprite_frames.duplicate() as SpriteFrames
-	fx.sprite_frames.set_animation_loop(StringName(fx_clip), true)
+	fx.sprite_frames = cached_frames
 	fx.centered = false
 	fx.offset = -pivot
 	fx.scale = Vector2(sc, sc)
@@ -1277,7 +1781,19 @@ func _step_homing_projectiles(delta: float) -> void:
 
 		if hits_sil or dist <= maxf(16.0, step_d):
 			var sil_hit: Vector2 = arena.call("compute_nearest_silhouette_point", tgt_node, tgt_cid, tgt_sc, fx.position)
+			if bool(arena.call("terrain_blocks_segment", fx.position, sil_hit)):
+				_spawn_hit_impact_fx(fx.position, "melee", "", Color.WHITE)
+				_spawn_powerup_explosion(fx.position, CLASH_EXPLOSION_SCALE)
+				fx.queue_free()
+				homing_projectiles.remove_at(i)
+				continue
 			if bool(pr["is_player"]):
+				var is_rp1 := bool(target_slot.get("is_remote_player", false))
+				var tid1 := str(target_slot.get("user_id", target_slot.get("id", ""))) if is_rp1 else str(target_slot.get("id", ""))
+				if not is_rp1:
+					_slot_local_hit_grace[tid1] = 0.45
+				_local_mana_grace_s = 0.45
+				combat_action_emitted.emit("power_up", tid1, "player" if is_rp1 else "monster", fx.position, arena.player_node.scale.x < 0.0 if arena.player_node != null else false)
 				apply_damage_to_slot(target_slot, float(pr["damage"]), float(pr["stamina_damage"]), sil_hit, "skill", true)
 			else:
 				apply_damage_to_player(float(pr["damage"]), sil_hit, true)
@@ -1294,23 +1810,34 @@ func _step_homing_projectiles(delta: float) -> void:
 		var new_dir := cur_dir.rotated(clampf(ang_diff, -turn_rate * delta, turn_rate * delta)).normalized()
 		var prev_pos := fx.position
 		var next_pos := prev_pos + new_dir * step_d
+		if bool(arena.call("terrain_blocks_segment", prev_pos, next_pos)):
+			_spawn_hit_impact_fx(prev_pos, "melee", "", Color.WHITE)
+			_spawn_powerup_explosion(prev_pos, CLASH_EXPLOSION_SCALE)
+			fx.queue_free()
+			homing_projectiles.remove_at(i)
+			continue
 		var sweep_rect := Rect2(
 			Vector2(minf(prev_pos.x, next_pos.x), minf(prev_pos.y, next_pos.y)),
 			Vector2(absf(next_pos.x - prev_pos.x), absf(next_pos.y - prev_pos.y))
 		).grow(proj_r)
 		if bool(arena.call("silhouette_intersects_rect", tgt_node, tgt_cid, tgt_sc, sweep_rect)):
 			var sil_hit2: Vector2 = arena.call("compute_nearest_silhouette_point", tgt_node, tgt_cid, tgt_sc, next_pos)
+			if bool(arena.call("terrain_blocks_segment", prev_pos, sil_hit2)):
+				_spawn_hit_impact_fx(prev_pos, "melee", "", Color.WHITE)
+				_spawn_powerup_explosion(prev_pos, CLASH_EXPLOSION_SCALE)
+				fx.queue_free()
+				homing_projectiles.remove_at(i)
+				continue
 			if bool(pr["is_player"]):
+				var is_rp2 := bool(target_slot.get("is_remote_player", false))
+				var tid2 := str(target_slot.get("user_id", target_slot.get("id", ""))) if is_rp2 else str(target_slot.get("id", ""))
+				if not is_rp2:
+					_slot_local_hit_grace[tid2] = 0.45
+				_local_mana_grace_s = 0.45
+				combat_action_emitted.emit("power_up", tid2, "player" if is_rp2 else "monster", next_pos, arena.player_node.scale.x < 0.0 if arena.player_node != null else false)
 				apply_damage_to_slot(target_slot, float(pr["damage"]), float(pr["stamina_damage"]), sil_hit2, "skill", true)
 			else:
 				apply_damage_to_player(float(pr["damage"]), sil_hit2, true)
-			fx.queue_free()
-			homing_projectiles.remove_at(i)
-			continue
-
-		if bool(arena.call("terrain_blocks_segment", prev_pos, next_pos)):
-			_spawn_hit_impact_fx(prev_pos, "melee", "", Color.WHITE)
-			_spawn_powerup_explosion(prev_pos, CLASH_EXPLOSION_SCALE)
 			fx.queue_free()
 			homing_projectiles.remove_at(i)
 			continue
@@ -1336,9 +1863,10 @@ func _step_slot_vertical(slot: Dictionary, delta: float) -> void:
 		return
 	var floor_y := float(arena.call("_ground_y_at", mnode.position.x))
 	var vy := float(slot["vy"])
-	if mnode.position.y < floor_y - 0.5:
+	if mnode.position.y < floor_y - 0.5 or vy < 0.0:
 		vy = float(arena.gravity_px_per_s2) * delta if vy == 0.0 else (vy + float(arena.gravity_px_per_s2) * delta)
-		mnode.position.y = minf(floor_y, mnode.position.y + maxf(2.0, vy * delta))
+		var dy_step := maxf(2.0, vy * delta) if vy >= 0.0 else (vy * delta)
+		mnode.position.y = minf(floor_y, mnode.position.y + dy_step)
 		slot["vy"] = vy
 	else:
 		mnode.position.y = floor_y
@@ -1395,7 +1923,7 @@ func _compute_slot_edge_gap(slot: Dictionary) -> float:
 
 
 func _find_slot_by_id(sid: String) -> Dictionary:
-	for s in slots:
+	for s in _get_combat_slots():
 		if str(s["id"]) == sid:
 			return s
 	return {}
@@ -1404,7 +1932,7 @@ func _find_slot_by_id(sid: String) -> Dictionary:
 func _find_nearest_alive_slot_in_melee() -> Dictionary:
 	var best: Dictionary = {}
 	var best_gap := MELEE_STRIKE_EDGE_PX
-	for s in slots:
+	for s in _get_combat_slots():
 		if not bool(s["alive"]):
 			continue
 		var gap := _compute_slot_edge_gap(s)
@@ -1422,7 +1950,7 @@ func _resolve_player_attack_target(allow_far: bool) -> Dictionary:
 				return ps
 	var best: Dictionary = {}
 	var best_gap := 99999.0 if allow_far else MELEE_STRIKE_EDGE_PX
-	for s in slots:
+	for s in _get_combat_slots():
 		if not bool(s["alive"]):
 			continue
 		var gap := _compute_slot_edge_gap(s)
@@ -1435,7 +1963,7 @@ func _resolve_player_attack_target(allow_far: bool) -> Dictionary:
 func _gather_pointer_candidates() -> Array[Dictionary]:
 	var out: Array[Dictionary] = []
 	var ref_x: float = arena.player_node.position.x if (player_spawned and arena.player_node != null) else (arena._arena_camera.position.x if arena._arena_camera != null else 960.0)
-	for s in slots:
+	for s in _get_combat_slots():
 		if bool(s["alive"]) and is_instance_valid(s["node"]):
 			var sn := s["node"] as Node2D
 			out.append({"kind": "enemy", "id": str(s["id"]), "node": sn, "dist": absf(sn.position.x - ref_x)})
@@ -1510,7 +2038,7 @@ func select_target_at_world_pos(world_pos: Vector2) -> Dictionary:
 	var best_item: Node2D = null
 	var best_dist := 999999.0
 
-	for s in slots:
+	for s in _get_combat_slots():
 		if not bool(s["alive"]) or not is_instance_valid(s["node"]):
 			continue
 		var mnode := s["node"] as Node2D
@@ -1581,22 +2109,37 @@ func draw_overlays(canvas: CanvasItem) -> void:
 		return
 	if show_monster_ranges:
 		_draw_monster_range_overlays(canvas)
-	# 1. Player overhead Green HP + Blue Mana bars
+	# 1. Player overhead Green HP + Blue Mana bars (+ display name in Alpha session)
 	if player_spawned and not player_dead and arena.player_node != null:
 		var p_rect := _get_player_body_rect()
 		var p_top: float = p_rect.position.y - 18.0
 		var p_cx: float = _get_player_core_pos().x
-		OverheadBarsDrawScript.draw_player_bars(canvas, p_cx, p_top, player_hp, player_max_hp, player_mana, player_max_mana)
+		OverheadBarsDrawScript.draw_player_bars(canvas, p_cx, p_top, player_hp, player_max_hp, player_mana, player_max_mana, local_display_name, false)
 
-	# 2. All alive monsters: Red HP + Milky White Stamina bars
-	for s in slots:
+	# 2. All alive monsters + Boss Drum + Remote Players (Vinh / Thái)
+	for s in _get_combat_slots():
 		if not bool(s["alive"]) or not is_instance_valid(s["node"]):
 			continue
 		var m_rect := _get_slot_body_rect(s)
 		var e_top := m_rect.position.y - 14.0
 		var e_cx := _get_slot_core_pos(s).x
+		if bool(s.get("is_remote_player", false)):
+			OverheadBarsDrawScript.draw_player_bars(
+				canvas,
+				e_cx,
+				e_top - 4.0,
+				float(s.get("hp", PLAYER_MAX_HP)),
+				float(s.get("max_hp", PLAYER_MAX_HP)),
+				float(s.get("mana", 0.0)),
+				float(s.get("max_mana", PLAYER_MAX_MANA)),
+				str(s.get("display_name", "")),
+				true
+			)
+			continue
 		var stunned := float(s["stun_timer_s"]) > 0.0
-		OverheadBarsDrawScript.draw_enemy_bars(canvas, e_cx, e_top, float(s["hp"]), float(s["max_hp"]), float(s["stamina"]), float(s["max_stamina"]), stunned, str(s["character_id"]))
+		var is_boss := bool(s.get("is_boss", false))
+		var lbl := "Drum" if is_boss else str(s["character_id"])
+		OverheadBarsDrawScript.draw_enemy_bars(canvas, e_cx, e_top, float(s["hp"]), float(s["max_hp"]), float(s["stamina"]), float(s["max_stamina"]), stunned, lbl, is_boss)
 
 	# 3. Target Pointer UI: transient Calligraphic Red "X" (only shown during touch/select interaction, then disappears)
 	var x_prog := clampf(pointer_x_anim_s / maxf(0.01, pointer_x_anim_dur_s), 0.0, 1.0)
@@ -1620,7 +2163,8 @@ func draw_overlays(canvas: CanvasItem) -> void:
 	# 4. Hit impact bursts & floating damage numbers
 	for imp in hit_impacts:
 		var prog := clampf(float(imp["elapsed_s"]) / maxf(0.01, float(imp["duration_s"])), 0.0, 1.0)
-		OverheadBarsDrawScript.draw_hit_impact(canvas, imp["pos"] as Vector2, prog, str(imp["kind"]))
+		var c_frames: SpriteFrames = imp.get("custom_frames", null) as SpriteFrames
+		OverheadBarsDrawScript.draw_hit_impact(canvas, imp["pos"] as Vector2, prog, str(imp["kind"]), imp.get("dir", Vector2.RIGHT) as Vector2, c_frames)
 	for ft in floating_texts:
 		var fprog := clampf(float(ft["elapsed_s"]) / maxf(0.01, float(ft["duration_s"])), 0.0, 1.0)
 		OverheadBarsDrawScript.draw_floating_damage(canvas, ft["pos"] as Vector2, str(ft["text"]), fprog, ft["color"] as Color)
@@ -1635,8 +2179,8 @@ func _draw_monster_range_overlays(canvas: CanvasItem) -> void:
 		var p_core := _get_player_core_pos()
 		canvas.draw_line(p_core - Vector2(8.0, 0.0), p_core + Vector2(8.0, 0.0), Color(0.20, 1.0, 1.0, 0.98), 2.0)
 		canvas.draw_line(p_core - Vector2(0.0, 8.0), p_core + Vector2(0.0, 8.0), Color(0.20, 1.0, 1.0, 0.98), 2.0)
-	for s in slots:
-		if not bool(s["alive"]) or not is_instance_valid(s["node"]):
+	for s in _get_combat_slots():
+		if not bool(s["alive"]) or not is_instance_valid(s["node"]) or bool(s.get("is_remote_player", false)):
 			continue
 		var mnode := s["node"] as Node2D
 		var m_rect := _get_slot_body_rect(s)
@@ -1680,3 +2224,242 @@ func _draw_monster_range_overlays(canvas: CanvasItem) -> void:
 				if player_spawned and not player_dead and arena.player_node != null:
 					info += " | edge=%dpx" % int(round(_compute_slot_edge_gap(s)))
 				canvas.draw_string(font, Vector2(zmin + 10.0, floor_y + 28.0), info, HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color(0.70, 1.0, 0.78, 0.96))
+
+
+func sync_from_zone_snapshot(players_by_id: Dictionary, monsters_by_id: Dictionary, local_uid: String) -> void:
+	if arena == null or not active:
+		return
+	var seen_remote := {}
+	for uid_key in players_by_id.keys():
+		var pdata: Dictionary = players_by_id[uid_key]
+		var uid := str(pdata.get("id", uid_key))
+		if uid.is_empty():
+			continue
+		if uid == local_uid:
+			if pdata.has("hp"):
+				var srv_hp := clampf(float(pdata["hp"]), 0.0, player_max_hp)
+				var hp_changed := _last_srv_local_hp < 0.0 or absf(srv_hp - _last_srv_local_hp) > 0.01
+				_last_srv_local_hp = srv_hp
+				if _local_hp_grace_s <= 0.0 and hp_changed:
+					player_hp = srv_hp
+			if pdata.has("mana"):
+				var srv_mana := clampf(float(pdata["mana"]), 0.0, player_max_mana)
+				var mana_changed := _last_srv_local_mana < 0.0 or absf(srv_mana - _last_srv_local_mana) > 0.01
+				_last_srv_local_mana = srv_mana
+				if _local_mana_grace_s <= 0.0 and mana_changed:
+					player_mana = srv_mana
+			if pdata.has("display_name") and not str(pdata["display_name"]).is_empty():
+				local_display_name = str(pdata["display_name"])
+			if pdata.has("alive") and _local_hp_grace_s <= 0.0:
+				var alive_srv := bool(pdata["alive"])
+				if not alive_srv and not player_dead and player_hp <= 0.0:
+					player_dead = true
+					player_respawn_timer_s = RESPAWN_PLAYER_DELAY_S
+					if arena.player_node != null:
+						arena.call("_play_fighter_clip", arena.player_node, "ko")
+				elif alive_srv and player_dead and _last_srv_local_hp >= player_max_hp - 0.1:
+					player_dead = false
+					player_respawn_timer_s = 0.0
+					if arena.player_node != null:
+						arena.player_node.position = Vector2(float(pdata.get("x", arena.player_node.position.x)), float(pdata.get("y", arena.player_node.position.y)))
+						arena.call("_play_fighter_clip", arena.player_node, "idle")
+			player_state_changed.emit()
+			continue
+
+		seen_remote[uid] = true
+		var rslot: Dictionary = remote_player_slots.get(uid, {})
+		var cid := str(pdata.get("character_id", "drum"))
+		if cid.is_empty():
+			cid = "drum"
+		if rslot.is_empty() or not is_instance_valid(rslot.get("node")):
+			rslot = _spawn_remote_player_slot(uid, cid, pdata)
+			if rslot.is_empty():
+				continue
+			remote_player_slots[uid] = rslot
+		rslot["display_name"] = str(pdata.get("display_name", uid))
+		rslot["hp"] = float(pdata.get("hp", PLAYER_MAX_HP))
+		rslot["max_hp"] = float(pdata.get("max_hp", PLAYER_MAX_HP))
+		rslot["mana"] = float(pdata.get("mana", 0.0))
+		rslot["max_mana"] = float(pdata.get("max_mana", PLAYER_MAX_MANA))
+		rslot["alive"] = bool(pdata.get("alive", true))
+		rslot["target_pos"] = Vector2(float(pdata.get("x", 560.0)), float(pdata.get("y", arena.ground_y)))
+		rslot["facing_left"] = bool(pdata.get("facing_left", false))
+		var act := str(pdata.get("act", "idle"))
+		if not act.is_empty():
+			rslot["remote_act"] = act
+		var rnode := rslot.get("node") as Node2D
+		if rnode != null and is_instance_valid(rnode):
+			rnode.visible = true
+			var sc := float(rslot.get("scale_val", 2.0))
+			rnode.scale = Vector2(-sc if bool(rslot["facing_left"]) else sc, sc)
+			var rspr := rnode.get_node_or_null("Sprite") as AnimatedSprite2D
+			if rspr != null and rspr.sprite_frames != null:
+				var desired := act if rspr.sprite_frames.has_animation(StringName(act)) else "idle"
+				if not bool(rslot["alive"]) and rspr.sprite_frames.has_animation(&"ko"):
+					desired = "ko"
+				if String(rspr.animation) != desired or not rspr.is_playing():
+					arena.call("_play_fighter_clip", rnode, desired)
+
+	for existing_uid in remote_player_slots.keys():
+		if not seen_remote.has(existing_uid):
+			var old_slot: Dictionary = remote_player_slots[existing_uid]
+			var old_node := old_slot.get("node") as Node2D
+			if old_node != null and is_instance_valid(old_node):
+				old_node.queue_free()
+			remote_player_slots.erase(existing_uid)
+
+	for mid_key in monsters_by_id.keys():
+		var mdata: Dictionary = monsters_by_id[mid_key]
+		var mid := str(mdata.get("id", mid_key))
+		var slot := _find_slot_by_id(mid)
+		if slot.is_empty():
+			continue
+		var prev_srv_alive: bool = bool(slot.get("_last_srv_alive", true))
+		var prev_srv_hp: float = float(slot.get("_last_srv_hp", -1.0))
+		var srv_alive: bool = bool(mdata.get("alive", true))
+		var srv_hp: float = clampf(float(mdata.get("hp", slot.get("hp", 1000.0))), 0.0, float(slot.get("max_hp", 1500.0)))
+		slot["_last_srv_alive"] = srv_alive
+		slot["_last_srv_hp"] = srv_hp
+		if float(_slot_local_hit_grace.get(mid, 0.0)) > 0.0:
+			continue
+		var hp_changed := prev_srv_hp < 0.0 or absf(srv_hp - prev_srv_hp) > 0.01
+		if hp_changed and bool(slot.get("alive", false)):
+			slot["hp"] = srv_hp
+		if not srv_alive and bool(slot.get("alive", false)):
+			slot["hp"] = 0.0
+			_kill_slot_monster(slot)
+		elif srv_alive and not prev_srv_alive and not bool(slot.get("alive", false)):
+			# Only resurrect on explicit server false -> true respawn transition (never from stale pre-kill snapshot!)
+			slot["alive"] = true
+			slot["hp"] = srv_hp
+			var mn := slot.get("node") as Node2D
+			if mn != null and is_instance_valid(mn):
+				mn.visible = true
+
+
+func _spawn_remote_player_slot(uid: String, cid: String, pdata: Dictionary) -> Dictionary:
+	var entry: Dictionary = arena.call("_find_character_entry_ro", cid)
+	if entry.is_empty():
+		entry = arena.call("_find_character_entry_ro", "drum")
+		cid = "drum"
+	if entry.is_empty():
+		return {}
+	var prefab_path := str(arena.call("_resolve_prefab_path", entry))
+	if prefab_path.is_empty() or not ResourceLoader.exists(prefab_path):
+		return {}
+	var packed := ResourceLoader.load(prefab_path) as PackedScene
+	if packed == null:
+		return {}
+	var inst := packed.instantiate() as Node2D
+	if inst == null:
+		return {}
+	var parent_layer: Node = arena.fighters_layer if arena.fighters_layer != null else arena
+	parent_layer.add_child(inst)
+	inst.name = "RemotePlayer_%s" % uid.replace(":", "_")
+	var sc := float(arena.call("_get_entry_default_scale", entry))
+	var px := float(pdata.get("x", 640.0))
+	var py := float(pdata.get("y", arena.call("_ground_y_at", px)))
+	var f_left := bool(pdata.get("facing_left", false))
+	if inst.get("external_orb_managed") != null:
+		inst.set("external_orb_managed", true)
+	arena.call("_configure_fighter_instance", inst, px, py, f_left, sc)
+	inst.z_index = int(arena.call("get_fighter_layer_z", cid, false)) + 2
+	return {
+		"id": "player:" + uid,
+		"user_id": uid,
+		"is_remote_player": true,
+		"is_boss": false,
+		"is_flying": false,
+		"character_id": cid,
+		"display_name": str(pdata.get("display_name", uid)),
+		"node": inst,
+		"scale_val": sc,
+		"hp": float(pdata.get("hp", PLAYER_MAX_HP)),
+		"max_hp": float(pdata.get("max_hp", PLAYER_MAX_HP)),
+		"mana": float(pdata.get("mana", 0.0)),
+		"max_mana": float(pdata.get("max_mana", PLAYER_MAX_MANA)),
+		"stamina": 100.0,
+		"max_stamina": 100.0,
+		"stun_timer_s": 0.0,
+		"alive": bool(pdata.get("alive", true)),
+		"facing_left": f_left,
+		"target_pos": Vector2(px, py),
+		"hit_flash_s": 0.0,
+		"hit_shake_s": 0.0,
+		"remote_act": str(pdata.get("act", "idle")),
+	}
+
+
+func step_remote_players(delta: float) -> void:
+	if delta <= 0.0:
+		return
+	var alpha := clampf(delta * 16.0, 0.0, 1.0)
+	for rp_val in remote_player_slots.values():
+		if not (rp_val is Dictionary):
+			continue
+		var rslot: Dictionary = rp_val
+		var rnode := rslot.get("node") as Node2D
+		if rnode == null or not is_instance_valid(rnode):
+			continue
+		var tgt_pos: Vector2 = rslot.get("target_pos", rnode.position)
+		if rnode.position.distance_to(tgt_pos) > 360.0:
+			rnode.position = tgt_pos
+		else:
+			rnode.position = rnode.position.lerp(tgt_pos, alpha)
+
+
+func apply_network_combat_event(ev: Dictionary, local_uid: String) -> void:
+	if arena == null or not active:
+		return
+	var action := str(ev.get("action", "attack_light"))
+	var attacker_id := str(ev.get("attacker_id", ""))
+	var target_id := str(ev.get("target_id", ""))
+	var target_kind := str(ev.get("target_kind", "player"))
+	var dmg := float(ev.get("damage", 0.0))
+	var hit_kind := "skill" if action == "power_up" else ("heavy" if action == "attack_heavy" else "melee")
+
+	if attacker_id == local_uid and ev.has("attacker_mana"):
+		_last_srv_local_mana = clampf(float(ev["attacker_mana"]), 0.0, player_max_mana)
+		if _local_mana_grace_s <= 0.0:
+			player_mana = _last_srv_local_mana
+			player_state_changed.emit()
+
+	if target_kind == "player" and target_id == local_uid and player_spawned and arena.player_node != null:
+		var fx_pos := _get_player_core_pos()
+		player_hit_flash_s = 0.19
+		player_hit_shake_s = 0.09 * HIT_SHAKE_SCALE_MUL
+		_spawn_hit_impact_fx(fx_pos, hit_kind, "-%d" % int(round(dmg)), Color(1.0, 0.30, 0.28, 1.0), Vector2.RIGHT)
+		if action == "power_up":
+			_spawn_powerup_explosion(fx_pos, DEFAULT_EXPLOSION_SCALE)
+		if ev.has("target_hp"):
+			player_hp = clampf(float(ev["target_hp"]), 0.0, player_max_hp)
+			_last_srv_local_hp = player_hp
+			if player_hp <= 0.0 and not player_dead:
+				player_dead = true
+				player_respawn_timer_s = RESPAWN_PLAYER_DELAY_S
+				arena.call("_play_fighter_clip", arena.player_node, "ko")
+		player_state_changed.emit()
+		return
+
+	var tgt_slot: Dictionary = remote_player_slots.get(target_id, {}) if target_kind == "player" else _find_slot_by_id(target_id)
+	if not tgt_slot.is_empty() and is_instance_valid(tgt_slot.get("node")):
+		if target_kind == "monster" and attacker_id == local_uid:
+			# Local client already applied monster damage, hit flash, and floating text on impact.
+			if ev.has("target_hp"):
+				tgt_slot["_last_srv_hp"] = maxf(0.0, float(ev["target_hp"]))
+			if ev.has("target_alive"):
+				tgt_slot["_last_srv_alive"] = bool(ev["target_alive"])
+			return
+		var fx_pos2 := _get_slot_core_pos(tgt_slot)
+		tgt_slot["hit_flash_s"] = 0.16
+		tgt_slot["hit_shake_s"] = 0.12 * HIT_SHAKE_SCALE_MUL
+		if ev.has("target_hp"):
+			tgt_slot["hp"] = maxf(0.0, float(ev["target_hp"]))
+			tgt_slot["_last_srv_hp"] = float(tgt_slot["hp"])
+		var dmg_col := Color(0.40, 0.94, 1.0, 1.0) if hit_kind == "skill" else Color(1.0, 0.92, 0.28, 1.0)
+		_spawn_hit_impact_fx(fx_pos2, hit_kind, "-%d" % int(round(dmg)) if dmg > 0.0 else "", dmg_col, Vector2.RIGHT)
+		if action == "power_up" and attacker_id != local_uid:
+			_spawn_powerup_explosion(fx_pos2, DEFAULT_EXPLOSION_SCALE)
+		if float(tgt_slot.get("hp", 1.0)) <= 0.0 and not bool(tgt_slot.get("is_remote_player", false)) and bool(tgt_slot.get("alive", false)):
+			tgt_slot["_last_srv_alive"] = false
+			_kill_slot_monster(tgt_slot)

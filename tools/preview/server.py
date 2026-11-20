@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import argparse
 import datetime
 import gzip
 import hashlib
@@ -17,6 +18,7 @@ import json
 import os
 import re
 import socket
+import subprocess
 import sys
 import threading
 import zipfile
@@ -33,8 +35,141 @@ BENCHMARK_JSON = REPO_ROOT / "engines" / "benchmark_report.json"
 ROSTER_JSON = ASSETS_DIR / "roster.json"
 WEB_EXPORT_DIR = REPO_ROOT / "build" / "web"
 ANDROID_APK_PATH = REPO_ROOT / "build" / "android" / "dr7-studio-debug.apk"
+IOS_IPA_PATH = REPO_ROOT / "build" / "ios" / "dr7-studio-unsigned.ipa"
+IOS_BASE_IPA_PATH = REPO_ROOT / "build" / "ios" / "base" / "dr7-studio-base.ipa"
+IOS_ALTSTORE_JSON_PATH = REPO_ROOT / "build" / "ios" / "altstore-source.json"
 REVIEW_ROOT = REPO_ROOT / "review"
+GODOT_VERSION = os.environ.get("GODOT_VERSION", "4.7.2-stable")
+GODOT_BIN_PATH = REPO_ROOT / "tools" / "godot" / "godot"
+GODOT_INSTALL_SCRIPT = REPO_ROOT / "tools" / "godot" / "install_godot.sh"
+LOOP_SCRIPT = REPO_ROOT / "loop.sh"
+_SHA256_LOCK = threading.Lock()
+_SHA256_FILE_CACHE: dict[tuple[str, int, int], str] = {}
 _APK_SHA256_CACHE: dict[tuple[int, int], str] = {}
+_IPA_SHA256_CACHE: dict[tuple[int, int], str] = {}
+_GODOT_BOOTSTRAP_LOCK = threading.Lock()
+_GODOT_BOOTSTRAP_STATE: dict[str, object] = {
+    "state": "idle",
+    "step": "",
+    "error": "",
+    "updated_at_utc": "",
+}
+
+
+def _utc_now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def get_godot_templates_dir() -> Path:
+    tpl_ver = GODOT_VERSION.replace("-", ".")
+    return Path.home() / ".local" / "share" / "godot" / "export_templates" / tpl_ver
+
+
+def is_godot_installed() -> bool:
+    return GODOT_BIN_PATH.is_file() and os.access(GODOT_BIN_PATH, os.X_OK)
+
+
+def is_godot_web_templates_installed() -> bool:
+    tpl_dir = get_godot_templates_dir()
+    return (tpl_dir / "web_nothreads_release.zip").is_file() or (tpl_dir / "web_release.zip").is_file()
+
+
+def is_godot_web_built(web_dir: Path | None = None) -> bool:
+    target_dir = web_dir if web_dir is not None else WEB_EXPORT_DIR
+    return all((target_dir / name).is_file() for name in ("index.html", "index.pck", "index.wasm", "index.js"))
+
+
+def get_godot_web_bootstrap_status() -> dict:
+    web_ready = is_godot_web_built()
+    godot_ok = is_godot_installed()
+    tpl_ok = is_godot_web_templates_installed()
+    state = str(_GODOT_BOOTSTRAP_STATE.get("state", "idle"))
+    if state == "idle" and web_ready and godot_ok:
+        state = "ready"
+    return {
+        "state": state,
+        "step": str(_GODOT_BOOTSTRAP_STATE.get("step", "")),
+        "error": str(_GODOT_BOOTSTRAP_STATE.get("error", "")),
+        "godot_version": GODOT_VERSION,
+        "godot_installed": godot_ok,
+        "templates_installed": tpl_ok,
+        "godot_web_ready": web_ready,
+        "updated_at_utc": str(_GODOT_BOOTSTRAP_STATE.get("updated_at_utc", "")),
+    }
+
+
+def _set_godot_bootstrap_state(state: str, step: str = "", error: str = "") -> None:
+    _GODOT_BOOTSTRAP_STATE["state"] = state
+    _GODOT_BOOTSTRAP_STATE["step"] = step
+    _GODOT_BOOTSTRAP_STATE["error"] = error
+    _GODOT_BOOTSTRAP_STATE["updated_at_utc"] = _utc_now_iso()
+
+
+def ensure_godot_web_ready(force_rebuild: bool = False) -> dict:
+    """Ensure Godot binary, Web export templates, and build/web/index.html are ready."""
+    with _GODOT_BOOTSTRAP_LOCK:
+        if not force_rebuild and is_godot_installed() and is_godot_web_templates_installed() and is_godot_web_built():
+            _set_godot_bootstrap_state("ready", "godot_web_ready")
+            return get_godot_web_bootstrap_status()
+
+        try:
+            if not is_godot_installed() or not is_godot_web_templates_installed():
+                _set_godot_bootstrap_state("bootstrapping", "installing_godot_and_templates")
+                print(
+                    f"[server] Đang tự động tải Godot {GODOT_VERSION} & Export Templates cho Godot Web thật...",
+                    flush=True,
+                )
+                res = subprocess.run(
+                    ["bash", str(GODOT_INSTALL_SCRIPT), "--with-templates"],
+                    cwd=str(REPO_ROOT),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if res.returncode != 0:
+                    err = (res.stderr or res.stdout or f"exit {res.returncode}").strip()[-600:]
+                    _set_godot_bootstrap_state("error", "installing_godot_and_templates", err)
+                    print(f"[server][WARN] Tải Godot thất bại: {err}", file=sys.stderr, flush=True)
+                    return get_godot_web_bootstrap_status()
+
+            if force_rebuild or not is_godot_web_built():
+                _set_godot_bootstrap_state("bootstrapping", "exporting_godot_web")
+                print("[server] Đang xuất Godot Web thật (./loop.sh web-export)...", flush=True)
+                res = subprocess.run(
+                    ["bash", str(LOOP_SCRIPT), "web-export"],
+                    cwd=str(REPO_ROOT),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if res.returncode != 0 or not is_godot_web_built():
+                    err = (res.stderr or res.stdout or f"exit {res.returncode}").strip()[-600:]
+                    _set_godot_bootstrap_state("error", "exporting_godot_web", err)
+                    print(f"[server][WARN] Export Godot Web thất bại: {err}", file=sys.stderr, flush=True)
+                    return get_godot_web_bootstrap_status()
+
+            _set_godot_bootstrap_state("ready", "godot_web_ready")
+            print("[server][OK] Godot Web thật đã sẵn sàng tại /godot-web/index.html", flush=True)
+            return get_godot_web_bootstrap_status()
+        except Exception as exc:
+            _set_godot_bootstrap_state("error", "exception", str(exc))
+            print(f"[server][WARN] Lỗi bootstrap Godot Web: {exc}", file=sys.stderr, flush=True)
+            return get_godot_web_bootstrap_status()
+
+
+def start_godot_web_bootstrap_async(force_rebuild: bool = False) -> threading.Thread | None:
+    if not force_rebuild and is_godot_installed() and is_godot_web_templates_installed() and is_godot_web_built():
+        _set_godot_bootstrap_state("ready", "godot_web_ready")
+        return None
+    _set_godot_bootstrap_state("bootstrapping", "queued")
+    t = threading.Thread(
+        target=ensure_godot_web_ready,
+        kwargs={"force_rebuild": force_rebuild},
+        name="godot-web-bootstrap",
+        daemon=True,
+    )
+    t.start()
+    return t
 
 
 def load_review_content() -> dict:
@@ -42,44 +177,62 @@ def load_review_content() -> dict:
     roster_path = REVIEW_ROOT / "review-roster.json"
     if not roster_path.is_file():
         return {"roster": {"schema": "dr7-studio.review_roster.v1", "characters": []}, "bundles": []}
-    bundle_dir = REVIEW_ROOT / "floating_camera/godot_bundle"
-    export_path = bundle_dir / "engine-export.json"
     roster = json.loads(roster_path.read_text(encoding="utf-8"))
-    export = json.loads(export_path.read_text(encoding="utf-8"))
-    source = REVIEW_ROOT / "floating_camera/source/FloatingCamera.gif"
-    ch = roster["characters"][0]
-    if sha256_file(source) != ch["canonical_identity"]["sha256"]:
-        raise ValueError("Review source SHA-256 mismatch")
-    for item in export["files"]:
-        if sha256_file(bundle_dir / item["path"]) != item["sha256"]:
-            raise ValueError(f"Review bundle SHA-256 mismatch: {item['path']}")
-    godot_dir = bundle_dir / "godot"
-    tres_path = godot_dir / "floating_camera.tres"
-    atlas_path = godot_dir / "floating_camera-atlas-00.png"
-    if sha256_file(atlas_path) != ch["review_atlas_sha256"]:
-        raise ValueError("Review roster atlas SHA-256 mismatch")
-    parsed = parse_tres(tres_path)
-    atlas_url = "/review/floating_camera/godot_bundle/godot/floating_camera-atlas-00.png"
-    for anim in parsed["animations"].values():
-        for frame in anim["frames"]:
-            frame["atlas_url"] = atlas_url
-    bundle = {
-        "id": "floating_camera_review", "priority": 2,
-        "title": "Floating Camera · Quái Human Test",
-        "name": "floating_camera", "bundle_dir": "res://review/floating_camera/godot_bundle",
-        "scene_2d": "res://review/floating_camera/FloatingCamera.tscn",
-        "frames_2d": "res://review/floating_camera/godot_bundle/godot/floating_camera.tres",
-        "export_json": "res://review/floating_camera/godot_bundle/engine-export.json",
-        "sha256_tres": sha256_file(tres_path),
-        "sha256_atlases": {atlas_path.name: sha256_file(atlas_path)},
-        "frame_size": export["frame_size"], "anchor_px": export["anchor_px"],
-        "default_clip": export["default_clip"],
-        "render_contract": export["render_contract"],
-        "tscn": parse_tscn(godot_dir / "floating_camera.tscn"),
-        "unique_frames": [], "animations": parsed["animations"],
-        "review_status": "human_test_pending",
-    }
-    return {"roster": roster, "bundles": [bundle]}
+    bundles: list[dict] = []
+    for idx, ch in enumerate(roster.get("characters", [])):
+        cid = str(ch.get("character_id") or ch.get("id") or ch.get("name") or f"review_{idx}")
+        bundle_rel = str(ch.get("bundle_dir") or f"res://review/{cid}/godot_bundle").replace("res://", "")
+        bundle_dir = (REPO_ROOT / bundle_rel).resolve()
+        export_path = bundle_dir / "engine-export.json"
+        if not export_path.is_file():
+            continue
+        export = json.loads(export_path.read_text(encoding="utf-8"))
+        ident = ch.get("canonical_identity") or {}
+        src_rel = str(ident.get("source_path") or "").replace("res://", "")
+        if src_rel and ident.get("sha256"):
+            src_path = (REPO_ROOT / src_rel).resolve()
+            if src_path.is_file() and sha256_file(src_path) != ident["sha256"]:
+                raise ValueError(f"Review source SHA-256 mismatch: {src_rel}")
+        for item in export.get("files", []):
+            if sha256_file(bundle_dir / item["path"]) != item["sha256"]:
+                raise ValueError(f"Review bundle SHA-256 mismatch: {item['path']}")
+        godot_dir = bundle_dir / "godot"
+        tres_files = sorted(godot_dir.glob("*.tres"))
+        atlas_files = sorted(godot_dir.glob("*-atlas-*.png"))
+        if not tres_files or not atlas_files:
+            continue
+        tres_path = tres_files[0]
+        atlas_path = atlas_files[0]
+        if ch.get("review_atlas_sha256") and sha256_file(atlas_path) != ch["review_atlas_sha256"]:
+            raise ValueError(f"Review roster atlas SHA-256 mismatch: {cid}")
+        parsed = parse_tres(tres_path)
+        atlas_url = "/" + atlas_path.relative_to(REPO_ROOT).as_posix()
+        for anim in parsed["animations"].values():
+            for frame in anim["frames"]:
+                frame["atlas_url"] = atlas_url
+        tscn_candidates = sorted(godot_dir.glob("*.tscn"))
+        tscn_parsed = parse_tscn(tscn_candidates[0]) if tscn_candidates else {}
+        bundles.append({
+            "id": f"{cid}_review",
+            "priority": 2,
+            "title": str(ch.get("display_name") or f"{cid} · Human Test"),
+            "name": cid,
+            "bundle_dir": "res://" + bundle_dir.relative_to(REPO_ROOT).as_posix(),
+            "scene_2d": str(ch.get("scene_2d") or f"res://review/{cid}/{cid}.tscn"),
+            "frames_2d": "res://" + tres_path.relative_to(REPO_ROOT).as_posix(),
+            "export_json": "res://" + export_path.relative_to(REPO_ROOT).as_posix(),
+            "sha256_tres": sha256_file(tres_path),
+            "sha256_atlases": {a.name: sha256_file(a) for a in atlas_files},
+            "frame_size": export["frame_size"],
+            "anchor_px": export["anchor_px"],
+            "default_clip": export["default_clip"],
+            "render_contract": export["render_contract"],
+            "tscn": tscn_parsed,
+            "unique_frames": [],
+            "animations": parsed["animations"],
+            "review_status": "human_test_pending",
+        })
+    return {"roster": roster, "bundles": bundles}
 
 
 def get_android_apk_info(apk_path: Path | None = None) -> dict:
@@ -92,23 +245,52 @@ def get_android_apk_info(apk_path: Path | None = None) -> dict:
         }
     st = target.stat()
     cache_key = (int(st.st_size), int(st.st_mtime_ns))
-    sha = _APK_SHA256_CACHE.get(cache_key)
+    with _SHA256_LOCK:
+        sha = _APK_SHA256_CACHE.get(cache_key)
     if sha is None:
-        h = hashlib.sha256()
-        with target.open("rb") as fh:
-            while True:
-                chunk = fh.read(1024 * 1024)
-                if not chunk:
-                    break
-                h.update(chunk)
-        sha = h.hexdigest()
-        _APK_SHA256_CACHE.clear()
-        _APK_SHA256_CACHE[cache_key] = sha
+        sha = sha256_file(target)
+        with _SHA256_LOCK:
+            _APK_SHA256_CACHE.clear()
+            _APK_SHA256_CACHE[cache_key] = sha
     built_at = datetime.datetime.fromtimestamp(st.st_mtime, tz=datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return {
         "available": True,
         "filename": target.name,
         "download_url": "/api/download-android-debug.apk",
+        "size_bytes": int(st.st_size),
+        "size_mb": round(st.st_size / (1024.0 * 1024.0), 1),
+        "sha256": sha,
+        "built_at_utc": built_at,
+    }
+
+
+def get_ios_ipa_info(ipa_path: Path | None = None, base_ipa_path: Path | None = None) -> dict:
+    target = ipa_path if ipa_path is not None else IOS_IPA_PATH
+    base_target = base_ipa_path if base_ipa_path is not None else IOS_BASE_IPA_PATH
+    if not target.is_file():
+        return {
+            "available": False,
+            "filename": target.name,
+            "download_url": "/api/download-ios-unsigned.ipa",
+            "altstore_source_url": "/api/ios-altstore-source.json",
+            "base_ipa_present": base_target.is_file(),
+        }
+    st = target.stat()
+    cache_key = (int(st.st_size), int(st.st_mtime_ns))
+    with _SHA256_LOCK:
+        sha = _IPA_SHA256_CACHE.get(cache_key)
+    if sha is None:
+        sha = sha256_file(target)
+        with _SHA256_LOCK:
+            _IPA_SHA256_CACHE.clear()
+            _IPA_SHA256_CACHE[cache_key] = sha
+    built_at = datetime.datetime.fromtimestamp(st.st_mtime, tz=datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {
+        "available": True,
+        "filename": target.name,
+        "download_url": "/api/download-ios-unsigned.ipa",
+        "altstore_source_url": "/api/ios-altstore-source.json",
+        "base_ipa_present": base_target.is_file(),
         "size_bytes": int(st.st_size),
         "size_mb": round(st.st_size / (1024.0 * 1024.0), 1),
         "sha256": sha,
@@ -253,11 +435,22 @@ def verify_motion_quality() -> dict:
 
 
 def sha256_file(path: Path) -> str:
+    st = path.stat()
+    cache_key = (str(path.resolve()), int(st.st_size), int(st.st_mtime_ns))
+    with _SHA256_LOCK:
+        cached = _SHA256_FILE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     h = hashlib.sha256()
     with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
+        for chunk in iter(lambda: f.read(262144), b""):
             h.update(chunk)
-    return h.hexdigest()
+    digest = h.hexdigest()
+    with _SHA256_LOCK:
+        if len(_SHA256_FILE_CACHE) > 2048:
+            _SHA256_FILE_CACHE.clear()
+        _SHA256_FILE_CACHE[cache_key] = digest
+    return digest
 
 
 def parse_tres(tres_path: Path) -> dict:
@@ -595,9 +788,26 @@ def verify_arena_stage_parity() -> list[str]:
     if not bg_file or not bg_file.is_file():
         errs.append(f"Missing sample map background: {bg_rel}")
     else:
-        actual_sha = hashlib.sha256(bg_file.read_bytes()).hexdigest()
+        actual_sha = sha256_file(bg_file)
         if actual_sha != map_cfg.get("sha256"):
             errs.append(f"Sample map sha256 mismatch: {actual_sha} != {map_cfg.get('sha256')}")
+
+    ext_map = map_cfg.get("extended_map") or {}
+    if ext_map:
+        ext_bg_rel = str(ext_map.get("background_path") or "")
+        ext_bg_file = REPO_ROOT / ext_bg_rel if ext_bg_rel else None
+        if not ext_bg_file or not ext_bg_file.is_file():
+            errs.append(f"Missing extended_map background: {ext_bg_rel}")
+        elif ext_map.get("sha256") and sha256_file(ext_bg_file) != ext_map.get("sha256"):
+            errs.append(f"Extended map sha256 mismatch: {sha256_file(ext_bg_file)} != {ext_map.get('sha256')}")
+        fg_trees = ext_map.get("foreground_trees") or {}
+        if fg_trees:
+            fg_rel = str(fg_trees.get("path") or "")
+            fg_file = REPO_ROOT / fg_rel if fg_rel else None
+            if not fg_file or not fg_file.is_file():
+                errs.append(f"Missing extended_map foreground_trees: {fg_rel}")
+            elif fg_trees.get("sha256") and sha256_file(fg_file) != fg_trees.get("sha256"):
+                errs.append(f"Foreground trees sha256 mismatch: {sha256_file(fg_file)} != {fg_trees.get('sha256')}")
 
     bezel_cfg = stage.get("phone_bezel", {})
     bezel_rel = bezel_cfg.get("repo_path", "")
@@ -622,7 +832,7 @@ def verify_arena_stage_parity() -> list[str]:
             f'window/stretch/scale_mode="{vp.get("stretch_scale_mode", "fractional")}"',
             f"window/handheld/orientation={vp.get('handheld_orientation_code', 0)}",
             f'renderer/rendering_method="{vp.get("renderer", "gl_compatibility")}"',
-            'run/main_scene="res://scenes/ArenaSandbox.tscn"',
+            'run/main_scene="res://scenes/AppStartup.tscn"',
         ]
         for needle in expected_lines:
             if needle not in pg:
@@ -669,13 +879,33 @@ def verify_arena_stage_parity() -> list[str]:
                 errs.append(f"Missing terrain {section_key}: {sinfo.get('path')}")
             elif sha256_file(sfile) != sinfo.get("sha256"):
                 errs.append(f"Terrain {section_key} SHA-256 mismatch")
+        ext_bd = terrain.get("extended_backdrop") or {}
+        if ext_bd:
+            if ext_bd.get("path"):
+                ext_f = REPO_ROOT / str(ext_bd["path"])
+                if not ext_f.is_file():
+                    errs.append(f"Missing terrain extended_backdrop: {ext_bd['path']}")
+                elif ext_bd.get("sha256") and sha256_file(ext_f) != ext_bd.get("sha256"):
+                    errs.append("Terrain extended_backdrop SHA-256 mismatch")
+            if ext_bd.get("foreground_trees_path"):
+                ext_t = REPO_ROOT / str(ext_bd["foreground_trees_path"])
+                if not ext_t.is_file():
+                    errs.append(f"Missing terrain extended_backdrop foreground_trees: {ext_bd['foreground_trees_path']}")
+                elif ext_bd.get("foreground_trees_sha256") and sha256_file(ext_t) != ext_bd.get("foreground_trees_sha256"):
+                    errs.append("Terrain extended_backdrop foreground_trees SHA-256 mismatch")
 
     for sc_rel in (
+        "scenes/AppStartup.tscn",
+        "scenes/AppStartup.gd",
+        "scenes/ui/LoginScreen.gd",
+        "scenes/ui/DragonBallLoadingOverlay.gd",
+        "scenes/net/AlphaSessionClient.gd",
         "scenes/ArenaSandbox.tscn",
         "scenes/ArenaSandbox.gd",
         "scenes/SkillAnimator2D.gd",
         "scenes/runtime/DisplayPolicy.gd",
-        "scenes/runtime/TouchHudOverlay.gd",
+        "scenes/runtime/MobileActionPad.gd",
+        "scenes/runtime/I18nManager.gd",
         "scenes/net/NetworkTransport.gd",
         "scenes/net/WebSocketTransport.gd",
         "scenes/net/ZoneClientSync.gd",
@@ -710,28 +940,41 @@ def build_godot_zip_bytes() -> bytes:
     buf = io.BytesIO()
     include_paths = [
         REPO_ROOT / "project.godot",
+        REPO_ROOT / "export_presets.cfg",
+        REPO_ROOT / "VERSION",
         REPO_ROOT / "scenes",
         REPO_ROOT / "tests",
         ASSETS_DIR / "maps",
         ASSETS_DIR / "items",
         ASSETS_DIR / "rituals",
+        ASSETS_DIR / "fx",
+        ASSETS_DIR / "i18n",
+        ASSETS_DIR / "app_icon",
+        ASSETS_DIR / "body_silhouettes.json",
         ROSTER_JSON,
     ]
     if ASSETS_DIR.exists():
         for export_json in sorted(ASSETS_DIR.rglob("engine-export.json")):
             include_paths.append(export_json.parent)
+    added_rel_paths: set[str] = set()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for item in include_paths:
             if not item.exists():
                 continue
             if item.is_file():
-                zf.write(item, item.relative_to(REPO_ROOT).as_posix())
+                rel_str = item.relative_to(REPO_ROOT).as_posix()
+                if rel_str not in added_rel_paths:
+                    added_rel_paths.add(rel_str)
+                    zf.write(item, rel_str)
             else:
                 for sub in sorted(item.rglob("*")):
                     if sub.is_file() and not sub.name.endswith((".pyc", ".uid")):
                         rel_str = sub.relative_to(REPO_ROOT).as_posix()
                         if any(skip in rel_str for skip in ("/godot-sprite3d/", "/aseprite/", "/source/")):
                             continue
+                        if rel_str in added_rel_paths:
+                            continue
+                        added_rel_paths.add(rel_str)
                         zf.write(sub, rel_str)
     return buf.getvalue()
 
@@ -808,7 +1051,7 @@ class PreviewHandler(BaseHTTPRequestHandler):
         if extra_headers:
             headers.update(extra_headers)
         size_bytes = file_path.stat().st_size
-        if compress or size_bytes < 4 * 1024 * 1024:
+        if size_bytes < 4 * 1024 * 1024:
             self._send_bytes(
                 200,
                 content_type,
@@ -903,11 +1146,40 @@ class PreviewHandler(BaseHTTPRequestHandler):
                 self._send_bytes(404, "text/plain; charset=utf-8", b"WASM not built")
             return
 
+        if req_path == "/api/godot-web-status":
+            data = json.dumps(get_godot_web_bootstrap_status(), ensure_ascii=False, indent=2).encode("utf-8")
+            self._send_bytes(200, "application/json; charset=utf-8", data, cache_control="no-cache", compress=True)
+            return
+
         if req_path == "/api/bundles":
             bundles = discover_bundles()
             roster = load_finalized_roster(bundles)
             parity = verify_engine_localhost_parity()
-            godot_web_index = REPO_ROOT / "build" / "web" / "index.html"
+            godot_bootstrap = get_godot_web_bootstrap_status()
+            try:
+                rituals = load_rituals()
+            except Exception as exc:
+                rituals = {}
+                parity["ok"] = False
+                parity["errors"].append(f"load_rituals error: {exc}")
+            try:
+                items = load_items()
+            except Exception as exc:
+                items = {"items": []}
+                parity["ok"] = False
+                parity["errors"].append(f"load_items error: {exc}")
+            try:
+                motion_q = verify_motion_quality()
+            except Exception as exc:
+                motion_q = {"ok_for_human_test": False, "release_approved": False, "characters": {}, "errors": [str(exc)]}
+                parity["ok"] = False
+                parity["errors"].append(f"verify_motion_quality error: {exc}")
+            try:
+                review_content = load_review_content()
+            except Exception as exc:
+                review_content = {"roster": {"schema": "dr7-studio.review_roster.v1", "characters": []}, "bundles": []}
+                parity["ok"] = False
+                parity["errors"].append(f"load_review_content error: {exc}")
             payload = {
                 "project_name": "DR7-Studio — Engine Parity & Human Test Workbench",
                 "bundles": bundles,
@@ -916,13 +1188,15 @@ class PreviewHandler(BaseHTTPRequestHandler):
                 "arena_stage": load_arena_stage(),
                 "terrain": load_map_terrain(),
                 "device_profiles": load_device_profiles(),
-                "godot_web_ready": godot_web_index.is_file(),
+                "godot_web_ready": bool(godot_bootstrap["godot_web_ready"]),
+                "godot_web_bootstrap": godot_bootstrap,
                 "android_apk": get_android_apk_info(),
-                "rituals": load_rituals(),
-                "items": load_items(),
+                "ios_ipa": get_ios_ipa_info(),
+                "rituals": rituals,
+                "items": items,
                 "parity": parity,
-                "motion_quality": verify_motion_quality(),
-                "review": load_review_content(),
+                "motion_quality": motion_q,
+                "review": review_content,
             }
             data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
             self._send_bytes(200, "application/json; charset=utf-8", data, compress=True)
@@ -932,7 +1206,16 @@ class PreviewHandler(BaseHTTPRequestHandler):
             web_root = (REPO_ROOT / "build" / "web").resolve()
             rel_name = req_path[len("/godot-web/"):].lstrip("/") or "index.html"
             target = (web_root / rel_name).resolve()
-            if not str(target).startswith(str(web_root)) or not target.is_file():
+            if not target.is_relative_to(web_root) or not target.is_file():
+                bstate = get_godot_web_bootstrap_status()
+                if bstate.get("state") == "bootstrapping":
+                    self._send_bytes(
+                        503,
+                        "text/plain; charset=utf-8",
+                        f"Godot Web dang tu dong tai va build ({bstate.get('step')})... Vui long thu lai sau vai giay.".encode("utf-8"),
+                        extra_headers={"Retry-After": "2"},
+                    )
+                    return
                 self._send_bytes(404, "text/plain; charset=utf-8", b"Godot Web export not built. Run ./loop.sh web-export")
                 return
             ext = target.suffix.lower()
@@ -981,11 +1264,56 @@ class PreviewHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if req_path == "/api/download-ios-unsigned.ipa":
+            if not IOS_IPA_PATH.is_file():
+                self._send_bytes(
+                    404,
+                    "text/plain; charset=utf-8",
+                    b"iOS IPA not built yet. Download base IPA from GitHub Actions into build/ios/base/dr7-studio-base.ipa and run ./loop.sh build-all",
+                )
+                return
+            self._send_file(
+                "application/octet-stream",
+                IOS_IPA_PATH,
+                extra_headers={
+                    "Content-Disposition": f'attachment; filename="{IOS_IPA_PATH.name}"',
+                    "X-Content-Type-Options": "nosniff",
+                },
+                cache_control="no-cache",
+                compress=False,
+            )
+            return
+
+        if req_path == "/api/ios-altstore-source.json":
+            ipa_info = get_ios_ipa_info()
+            if not ipa_info.get("available"):
+                self._send_bytes(404, "application/json; charset=utf-8", b'{"error":"ios_ipa_not_built"}')
+                return
+            ver_txt = (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip() if (REPO_ROOT / "VERSION").is_file() else "0.16.0"
+            host_hdr = self.headers.get("Host") or "localhost:8080"
+            scheme = "https" if self.headers.get("X-Forwarded-Proto", "").lower() == "https" else "http"
+            base_url = f"{scheme}://{host_hdr}"
+            ios_tools_dir = str(REPO_ROOT / "tools" / "ios")
+            if ios_tools_dir not in sys.path:
+                sys.path.insert(0, ios_tools_dir)
+            import generate_altstore_source  # type: ignore
+            src_payload = generate_altstore_source.build_source_payload(
+                version=ver_txt,
+                download_url=f"{base_url}/api/download-ios-unsigned.ipa",
+                source_url=f"{base_url}/api/ios-altstore-source.json",
+                icon_url=f"{base_url}/assets/app_icon/icon_512.png",
+                size_bytes=int(ipa_info.get("size_bytes", 0)),
+                sha256_hex=str(ipa_info.get("sha256", "")),
+            )
+            data = json.dumps(src_payload, ensure_ascii=False, indent=2).encode("utf-8")
+            self._send_bytes(200, "application/json; charset=utf-8", data, cache_control="no-cache", compress=True)
+            return
+
         if req_path.startswith("/preview-assets/"):
             preview_assets_dir = (REPO_ROOT / "tools" / "preview" / "assets").resolve()
             rel_name = req_path[len("/preview-assets/"):].lstrip("/")
             target = (preview_assets_dir / rel_name).resolve()
-            if not str(target).startswith(str(preview_assets_dir)) or not target.is_file():
+            if not target.is_relative_to(preview_assets_dir) or not target.is_file():
                 self._send_bytes(404, "text/plain; charset=utf-8", b"Not found")
                 return
             ext = target.suffix.lower()
@@ -999,8 +1327,9 @@ class PreviewHandler(BaseHTTPRequestHandler):
             return
 
         if req_path.startswith("/assets/"):
+            assets_root = ASSETS_DIR.resolve()
             target = (REPO_ROOT / req_path.lstrip("/")).resolve()
-            if not str(target).startswith(str(ASSETS_DIR.resolve())) or not target.is_file():
+            if not target.is_relative_to(assets_root) or not target.is_file():
                 self._send_bytes(404, "text/plain; charset=utf-8", b"Not found")
                 return
             ext = target.suffix.lower()
@@ -1016,8 +1345,9 @@ class PreviewHandler(BaseHTTPRequestHandler):
             return
 
         if req_path.startswith("/review/"):
+            review_root = REVIEW_ROOT.resolve()
             target = (REPO_ROOT / req_path.lstrip("/")).resolve()
-            if not str(target).startswith(str(REVIEW_ROOT.resolve())) or target.suffix.lower() != ".png" or not target.is_file():
+            if not target.is_relative_to(review_root) or target.suffix.lower() != ".png" or not target.is_file():
                 self._send_bytes(404, "text/plain; charset=utf-8", b"Not found")
                 return
             self._send_file("image/png", target)
@@ -1058,10 +1388,45 @@ def create_server(port: int) -> ThreadingHTTPServer:
     return ipv4_server
 
 
-def main() -> None:
-    port = int(os.environ.get("PORT", "8080"))
-    server = create_server(port)
-    print(f"DR7-Studio Engine Parity & Human-Test Server listening on http://localhost:{port}", flush=True)
+def parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="DR7-Studio Engine Parity & Human-Test Server")
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8080")), help="HTTP port (default: 8080)")
+    parser.add_argument(
+        "--no-auto-godot",
+        action="store_true",
+        default=os.environ.get("DR7_SKIP_AUTO_GODOT_WEB", "").strip().lower() in ("1", "true", "yes"),
+        help="Disable automatic Godot + Web export bootstrap on startup",
+    )
+    parser.add_argument(
+        "--wait-godot-web",
+        action="store_true",
+        default=os.environ.get("DR7_WAIT_GODOT_WEB", "").strip().lower() in ("1", "true", "yes"),
+        help="Wait until Godot Web export completes before listening",
+    )
+    parser.add_argument(
+        "--rebuild-web",
+        action="store_true",
+        default=False,
+        help="Force re-export Godot Web build on startup",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_cli_args(argv)
+    if not args.no_auto_godot:
+        if args.wait_godot_web:
+            ensure_godot_web_ready(force_rebuild=args.rebuild_web)
+        else:
+            start_godot_web_bootstrap_async(force_rebuild=args.rebuild_web)
+
+    server = create_server(args.port)
+    bstate = get_godot_web_bootstrap_status()
+    print(
+        f"DR7-Studio Engine Parity & Human-Test Server listening on http://localhost:{args.port} "
+        f"(Godot Web: {bstate['state']}, ready={bstate['godot_web_ready']})",
+        flush=True,
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

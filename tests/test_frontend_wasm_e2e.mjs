@@ -217,6 +217,9 @@ await new Promise(r => setTimeout(r, 60));
 const T = sandbox.__TEST__;
 
 assert.equal(getEl('runtimeErrorBanner').textContent, '', 'initApp must produce ZERO runtime errors');
+if (apiPayload.godot_web_ready) {
+  assert.ok(!getEl('godotWebFrame').src, 'Godot Web iframe must lazy-load only when Tab Arena or toggle is activated');
+}
 assert.ok(apiPayload.roster.characters.some(c => c.character_id === 'floating_camera'), 'Floating Camera must be finalized in roster.json');
 assert.equal(T.state.api.roster.characters.length, 11, 'Finalized roster must include all 11 approved characters');
 T.selectCharacter('floating_camera');
@@ -1181,7 +1184,7 @@ if (apiPayload.roster.characters.length > 0) {
   assert.equal(T.arena.clip, 'walk', 'Bat resumes walk immediately after turn without idle flash');
   T.arena.keys = {};
 
-  // Chilopoda: <50px laser power_up, >=50px burrow attack_light targeting player X
+  // Chilopoda: <50 px power_up, >=50 px burrow toward the player
   T.selectCharacter('chilopoda');
   T.setArenaCharacterScale(1.0);
   T.setUtilityAiEnabled(true);
@@ -1193,7 +1196,8 @@ if (apiPayload.roster.characters.length > 0) {
   T.arena.x = 1200;
   T.stepEnemyAiFrame(16.67);
   assert.equal(T.arena.enemyAi.lastAttackClip, 'attack_light');
-  assert.ok(T.arena.enemyAi.chiloAction && Array.isArray(T.arena.enemyAi.chiloAction.target));
+  const burrow = T.arena.enemyAi.chiloAction;
+  assert.equal(burrow.startX + (burrow.target[0] - 176) * burrow.sign, 1200);
 
   // Tasmanian King Crab: spawns facing left (-X), rotates toward player behind its back (+X or -X) before firing power_up
   T.selectCharacter('tasmanian_king_crab');
@@ -1322,6 +1326,7 @@ if (apiPayload.roster.characters.length > 0) {
 
   // Toggle real Godot Web runtime iframe when build/web/index.html exists
   if (apiPayload.godot_web_ready) {
+    assert.ok(getEl('godotWebFrame').src.endsWith('/godot-web/index.html'), 'Switching to Tab Arena must lazy-load Godot Web iframe');
     getEl('chkGodotWebRuntime').onchange({ target: { checked: true } });
     assert.equal(getEl('godotWebFrame').style.display, 'block');
     assert.ok(getEl('godotWebFrame').src.endsWith('/godot-web/index.html'));

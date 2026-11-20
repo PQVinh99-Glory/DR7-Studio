@@ -23,7 +23,7 @@ jobs:
           node-version: "22"
 
       - name: Install pixel asset verification dependencies
-        run: python3 -m pip install numpy Pillow
+        run: python3 -m pip install numpy Pillow scipy
 
       - name: Set up Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -56,6 +56,7 @@ jobs:
           timeout 60s ./tools/godot/godot --headless --path . --script res://tests/test_bat_turn.gd
           timeout 60s ./tools/godot/godot --headless --path . --script res://tests/test_trex_turn.gd
           timeout 60s ./tools/godot/godot --headless --path . --script res://tests/test_chilopoda_actions.gd
+          timeout 60s ./tools/godot/godot --headless --path . --script res://tests/test_floating_camera_actions.gd
           timeout 60s ./tools/godot/godot --headless --path . --script res://tests/test_arena_sandbox.gd
           timeout 60s ./tools/godot/godot --headless --path . --script res://tests/test_shenron_summon.gd
           timeout 60s ./tools/godot/godot --headless --path . --script res://tests/test_dragon_ball_items.gd

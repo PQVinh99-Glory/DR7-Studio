@@ -1,0 +1,258 @@
+name: Build iOS IPA (Flexible Sideload / Ad-Hoc OTA / Optional TestFlight)
+
+on:
+  workflow_dispatch:
+    inputs:
+      signing_mode:
+        description: "unsigned_sideload (0d: Sideloadly/AltStore/SideStore), signed_adhoc_ota (100 UDIDs), or signed_appstore_testflight (optional Store/TestFlight)"
+        required: true
+        default: "unsigned_sideload"
+        type: choice
+        options:
+          - unsigned_sideload
+          - signed_adhoc_ota
+          - signed_appstore_testflight
+      upload_testflight:
+        description: "Upload signed IPA to TestFlight via App Store Connect API Key (signed_appstore_testflight only; optional)"
+        required: false
+        default: false
+        type: boolean
+      publish_github_release:
+        description: "Publish unsigned IPA + altstore-source.json to GitHub Pre-Release for SideStore/AltStore URL updates"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  build-ios-ipa:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      GODOT_VERSION: "4.7.2"
+      GODOT_RELEASE_TAG: "4.7.2-stable"
+      APP_BUNDLE_ID: "com.dr7studio.dragonball2d"
+      APP_NAME: "dr7-studio"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Read SemVer from VERSION
+        id: ver
+        run: |
+          APP_VER="$(tr -d '[:space:]' < VERSION)"
+          echo "version=${APP_VER}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Godot 4.7.2 & Export Templates (save macOS runner minutes)
+        id: godot-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/godot-bin
+            ~/Library/Application Support/Godot/export_templates/${{ env.GODOT_VERSION }}.stable
+          key: godot-macos-${{ env.GODOT_RELEASE_TAG }}-v1
+
+      - name: Download & Install Godot 4.7.2 + Export Templates (macOS)
+        if: steps.godot-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$HOME/godot-bin" "$HOME/Library/Application Support/Godot/export_templates/${GODOT_VERSION}.stable"
+          curl -fSL "https://github.com/godotengine/godot/releases/download/${GODOT_RELEASE_TAG}/Godot_v${GODOT_RELEASE_TAG}_macos.universal.zip" -o /tmp/godot-macos.zip
+          unzip -q /tmp/godot-macos.zip -d "$HOME/godot-bin"
+          chmod +x "$HOME/godot-bin/Godot.app/Contents/MacOS/Godot"
+
+          curl -fSL "https://github.com/godotengine/godot/releases/download/${GODOT_RELEASE_TAG}/Godot_v${GODOT_RELEASE_TAG}_export_templates.tpz" -o /tmp/godot-templates.tpz
+          unzip -q /tmp/godot-templates.tpz -d /tmp/godot-tpz
+          mv /tmp/godot-tpz/templates/* "$HOME/Library/Application Support/Godot/export_templates/${GODOT_VERSION}.stable/"
+          rm -rf /tmp/godot-macos.zip /tmp/godot-templates.tpz /tmp/godot-tpz
+
+      - name: Import Apple Signing Certificate & Provisioning Profile (Ad-Hoc OTA or Store/TestFlight)
+        if: ${{ inputs.signing_mode == 'signed_adhoc_ota' || inputs.signing_mode == 'signed_appstore_testflight' }}
+        env:
+          IOS_DIST_CERT_P12_BASE64: ${{ secrets.IOS_DIST_CERT_P12_BASE64 }}
+          IOS_DIST_CERT_PASSWORD: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
+          IOS_PROVISION_PROFILE_BASE64: ${{ secrets.IOS_PROVISION_PROFILE_BASE64 }}
+          KEYCHAIN_PASSWORD: ${{ secrets.IOS_KEYCHAIN_PASSWORD }}
+        run: |
+          if [ -z "$IOS_DIST_CERT_P12_BASE64" ] || [ -z "$IOS_PROVISION_PROFILE_BASE64" ]; then
+            echo "::error::Thiếu GitHub Secrets (IOS_DIST_CERT_P12_BASE64 / IOS_PROVISION_PROFILE_BASE64) cho chế độ ký Apple."
+            exit 1
+          fi
+          KC_PASS="${KEYCHAIN_PASSWORD:-dr7-temp-ci-keychain}"
+          security create-keychain -p "$KC_PASS" build.keychain
+          security list-keychains -d user -s build.keychain $(security list-keychains -d user | tr -d '"')
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KC_PASS" build.keychain
+          security set-keychain-settings -lut 21600 build.keychain
+
+          echo "$IOS_DIST_CERT_P12_BASE64" | base64 --decode > /tmp/dist.p12
+          security import /tmp/dist.p12 -k build.keychain -P "$IOS_DIST_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KC_PASS" build.keychain
+
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          echo "$IOS_PROVISION_PROFILE_BASE64" | base64 --decode > /tmp/profile.mobileprovision
+          PROFILE_UUID="$(/usr/libexec/PlistBuddy -c 'Print :UUID' /dev/stdin <<< "$(security cms -D -i /tmp/profile.mobileprovision)")"
+          PROFILE_NAME="$(/usr/libexec/PlistBuddy -c 'Print :Name' /dev/stdin <<< "$(security cms -D -i /tmp/profile.mobileprovision)")"
+          TEAM_ID="$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' /dev/stdin <<< "$(security cms -D -i /tmp/profile.mobileprovision)")"
+          cp /tmp/profile.mobileprovision "$HOME/Library/MobileDevice/Provisioning Profiles/${PROFILE_UUID}.mobileprovision"
+          echo "PROFILE_UUID=${PROFILE_UUID}" >> "$GITHUB_ENV"
+          echo "PROFILE_NAME=${PROFILE_NAME}" >> "$GITHUB_ENV"
+          echo "TEAM_ID=${TEAM_ID}" >> "$GITHUB_ENV"
+
+      - name: Configure iOS Team ID & Import/Export Xcode Project
+        run: |
+          mkdir -p build/ios
+          touch build/.gdignore
+          # Godot requires a Team ID to generate an Xcode project even for unsigned builds.
+          EFFECTIVE_TEAM_ID="${TEAM_ID:-0000000000}"
+          python3 - "$EFFECTIVE_TEAM_ID" <<'PY'
+          import pathlib, re, sys
+          team_id = sys.argv[1]
+          p = pathlib.Path("export_presets.cfg")
+          txt = p.read_text(encoding="utf-8")
+          updated, n = re.subn(
+              r'(?m)^application/app_store_team_id=".*"$',
+              f'application/app_store_team_id="{team_id}"',
+              txt,
+              count=1,
+          )
+          assert n == 1, "Missing application/app_store_team_id in export_presets.cfg"
+          p.write_text(updated, encoding="utf-8")
+          PY
+          GODOT_BIN="$HOME/godot-bin/Godot.app/Contents/MacOS/Godot"
+          "$GODOT_BIN" --headless --path . --editor --import
+          "$GODOT_BIN" --headless --path . --export-release "iOS" "build/ios/${APP_NAME}.xcodeproj"
+          test -f "build/ios/${APP_NAME}.xcodeproj/project.pbxproj"
+
+      - name: Build Unsigned IPA (0d Sideload — Sideloadly / AltStore / SideStore / Base IPA for Linux Repack)
+        if: ${{ inputs.signing_mode == 'unsigned_sideload' }}
+        run: |
+          xcodebuild \
+            -project "build/ios/${APP_NAME}.xcodeproj" \
+            -scheme "${APP_NAME}" \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath "build/ios/${APP_NAME}.xcarchive" \
+            DEVELOPMENT_TEAM="" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            AD_HOC_CODE_SIGNING_ALLOWED=NO \
+            archive
+
+          mkdir -p build/ios/Payload
+          cp -R "build/ios/${APP_NAME}.xcarchive/Products/Applications/${APP_NAME}.app" build/ios/Payload/
+          IPA_FILE="build/ios/${APP_NAME}-v${{ steps.ver.outputs.version }}-unsigned.ipa"
+          (cd build/ios && zip -qry "$(basename "$IPA_FILE")" Payload)
+          shasum -a 256 "$IPA_FILE" | tee "build/ios/ipa-sha256.txt"
+
+          TAG_NAME="ios-sideload-v${{ steps.ver.outputs.version }}"
+          REPO_URL="https://github.com/${{ github.repository }}"
+          python3 tools/ios/generate_altstore_source.py \
+            --version "${{ steps.ver.outputs.version }}" \
+            --ipa "$IPA_FILE" \
+            --download-url "${REPO_URL}/releases/download/${TAG_NAME}/$(basename "$IPA_FILE")" \
+            --source-url "${REPO_URL}/releases/download/${TAG_NAME}/altstore-source.json" \
+            --icon-url "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/assets/app_icon/icon_512.png" \
+            --bundle-id "${APP_BUNDLE_ID}" \
+            --output "build/ios/altstore-source.json"
+
+      - name: Archive & Export Signed IPA (Ad-Hoc OTA or App Store / TestFlight)
+        if: ${{ inputs.signing_mode == 'signed_adhoc_ota' || inputs.signing_mode == 'signed_appstore_testflight' }}
+        run: |
+          EXPORT_METHOD="app-store-connect"
+          OUT_SUFFIX="appstore-signed"
+          if [ "${{ inputs.signing_mode }}" = "signed_adhoc_ota" ]; then
+            EXPORT_METHOD="ad-hoc"
+            OUT_SUFFIX="adhoc-signed"
+          fi
+
+          cat > build/ios/ExportOptions.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>${EXPORT_METHOD}</string>
+            <key>teamID</key>
+            <string>${TEAM_ID}</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>${APP_BUNDLE_ID}</key>
+              <string>${PROFILE_NAME}</string>
+            </dict>
+          </dict>
+          </plist>
+          EOF
+
+          xcodebuild \
+            -project "build/ios/${APP_NAME}.xcodeproj" \
+            -scheme "${APP_NAME}" \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath "build/ios/${APP_NAME}.xcarchive" \
+            DEVELOPMENT_TEAM="${TEAM_ID}" \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
+            PROVISIONING_PROFILE_SPECIFIER="${PROFILE_NAME}" \
+            archive
+
+          xcodebuild \
+            -exportArchive \
+            -archivePath "build/ios/${APP_NAME}.xcarchive" \
+            -exportPath "build/ios/export" \
+            -exportOptionsPlist "build/ios/ExportOptions.plist"
+
+          OUT_IPA="build/ios/${APP_NAME}-v${{ steps.ver.outputs.version }}-${OUT_SUFFIX}.ipa"
+          mv build/ios/export/*.ipa "$OUT_IPA"
+          shasum -a 256 "$OUT_IPA" | tee "build/ios/ipa-sha256.txt"
+
+      - name: Optional Upload Signed IPA to TestFlight
+        if: ${{ inputs.signing_mode == 'signed_appstore_testflight' && inputs.upload_testflight == true }}
+        env:
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          ASC_API_KEY_P8_BASE64: ${{ secrets.ASC_API_KEY_P8_BASE64 }}
+        run: |
+          if [ -z "$ASC_API_KEY_ID" ] || [ -z "$ASC_API_ISSUER_ID" ] || [ -z "$ASC_API_KEY_P8_BASE64" ]; then
+            echo "::error::Thiếu Secrets ASC_API_KEY_ID / ASC_API_ISSUER_ID / ASC_API_KEY_P8_BASE64 để upload TestFlight."
+            exit 1
+          fi
+          mkdir -p "$HOME/.private_keys"
+          echo "$ASC_API_KEY_P8_BASE64" | base64 --decode > "$HOME/.private_keys/AuthKey_${ASC_API_KEY_ID}.p8"
+          xcrun altool --upload-app \
+            -f "build/ios/${APP_NAME}-v${{ steps.ver.outputs.version }}-appstore-signed.ipa" \
+            -t ios \
+            --apiKey "$ASC_API_KEY_ID" \
+            --apiIssuer "$ASC_API_ISSUER_ID"
+
+      - name: Publish Unsigned IPA & AltStore/SideStore Source to GitHub Pre-Release
+        if: ${{ inputs.signing_mode == 'unsigned_sideload' && inputs.publish_github_release == true }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG_NAME="ios-sideload-v${{ steps.ver.outputs.version }}"
+          IPA_FILE="build/ios/${APP_NAME}-v${{ steps.ver.outputs.version }}-unsigned.ipa"
+          gh release delete "$TAG_NAME" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$TAG_NAME" \
+            "$IPA_FILE" \
+            "build/ios/ipa-sha256.txt" \
+            "build/ios/altstore-source.json" \
+            --prerelease \
+            --title "DR7-Studio iOS Sideload v${{ steps.ver.outputs.version }}" \
+            --notes "Unsigned iOS IPA for Sideloadly / AltStore / SideStore (0d test build). Add altstore-source.json URL in SideStore/AltStore for direct updates."
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dr7-studio-ios-${{ inputs.signing_mode }}-v${{ steps.ver.outputs.version }}
+          if-no-files-found: error
+          path: |
+            build/ios/*.ipa
+            build/ios/ipa-sha256.txt
+            build/ios/altstore-source.json
+          retention-days: 14

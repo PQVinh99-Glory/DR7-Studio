@@ -25,7 +25,40 @@
     "source_size_px": [1199, 675],
     "sha256": "0af6a984cc9de1e4c3b8389bc177c8092624af67d1a1399f5d06741466f62be6",
     "render_rect_px": [0, 0, 1920, 1080],
-    "fit_mode": "cover_16_9"
+    "fit_mode": "cover_16_9",
+    "extended_map": {
+      "approved_by_owner": true,
+      "background_path": "assets/maps/rocky_plateau/rocky-plateau-extended-4steps.png",
+      "background_res_path": "res://assets/maps/rocky_plateau/rocky-plateau-extended-4steps.png",
+      "background_web_path": "/assets/maps/rocky_plateau/rocky-plateau-extended-4steps.png",
+      "sha256": "e9ff4be801640a82b56e538b7981d7b4ba132f406b39298e111eb9c5e2adc1b1",
+      "image_size_px": [6600, 1350],
+      "world_bounds": {
+        "left_x": -240,
+        "right_x": 6360,
+        "top_y": -210,
+        "bottom_y": 1140
+      },
+      "steps": [
+        {"index": 1, "drop_x": 2850, "wall_x": 2876, "drop_y": 50},
+        {"index": 2, "drop_x": 3695, "wall_x": 3724, "drop_y": 105},
+        {"index": 3, "drop_x": 4740, "wall_x": 4778, "drop_y": 135},
+        {"index": 4, "drop_x": 5560, "wall_x": 5582, "drop_y": 190}
+      ],
+      "foreground_trees": {
+        "path": "assets/maps/rocky_plateau/rocky-plateau-foreground-trees.png",
+        "res_path": "res://assets/maps/rocky_plateau/rocky-plateau-foreground-trees.png",
+        "web_path": "/assets/maps/rocky_plateau/rocky-plateau-foreground-trees.png",
+        "sha256": "74dc207da6e4650f2f10c19d1a9d122a8008782015a1fba1bcc63372d24ea494",
+        "z_index": -20,
+        "scale": [0.7, 0.94],
+        "placements": [
+          {"region": [0, 0, 598, 907], "trunk_source_x": 264.51, "root_bottom_src_y": 904.0, "trunk_world_x": 4695.0, "rear_grass_world_y": 828.0},
+          {"region": [598, 0, 741, 1067], "trunk_source_x": 298.61, "root_bottom_src_y": 1064.0, "trunk_world_x": 5420.0, "rear_grass_world_y": 888.0},
+          {"region": [1339, 0, 688, 1088], "trunk_source_x": 312.60, "root_bottom_src_y": 1085.0, "trunk_world_x": 6050.0, "rear_grass_world_y": 954.0}
+        ]
+      }
+    }
   },
   "gameplay": {
     "ground_y": 840,
@@ -67,7 +100,7 @@
       "monster_count_per_map": [5, 7],
       "monster_spacing_max_px": 500,
       "special_roles": {
-        "chilopoda": "burrow_far_laser_close",
+        "chilopoda": "power_up_close_burrow_far",
         "flight": "hover_no_chase_ranged_far_melee_close"
       }
     }

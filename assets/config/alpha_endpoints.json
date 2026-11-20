@@ -1,0 +1,12 @@
+{
+  "schema": "dr7.alpha_endpoints.v1",
+  "auth_base_url": "https://dr7-alpha-staging.hem-tra.workers.dev",
+  "ws_url": "wss://dr7-alpha-staging.hem-tra.workers.dev/ws",
+  "local_dev_auth_url": "http://127.0.0.1:8787",
+  "local_dev_ws_url": "ws://127.0.0.1:8788",
+  "default_map_id": "rocky_plateau",
+  "default_zone_id": 0,
+  "default_character_id": "drum",
+  "loading_step_duration_s": 0.18,
+  "connect_timeout_s": 12.0
+}

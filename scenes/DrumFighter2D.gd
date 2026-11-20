@@ -100,7 +100,8 @@ func _process(delta: float) -> void:
 	if _orb_active and is_instance_valid(projectile_fx):
 		_orb_elapsed_s += delta
 		var previous_orb_pos := projectile_fx.global_position
-		projectile_fx.position.x += _orb_dir * _orb_speed_px_per_s * delta
+		var world_scale_x := maxf(0.1, absf(global_scale.x))
+		projectile_fx.global_position.x += _orb_dir * _orb_speed_px_per_s * world_scale_x * delta
 		var stage := get_tree().current_scene
 		var terrain_hit := stage != null and stage.has_method("terrain_blocks_segment") and bool(stage.call("terrain_blocks_segment", previous_orb_pos, projectile_fx.global_position))
 		if terrain_hit or _orb_elapsed_s >= _orb_lifetime_s:
@@ -112,11 +113,15 @@ func _process(delta: float) -> void:
 func _launch_electric_orb() -> void:
 	if not is_instance_valid(projectile_fx):
 		return
-	_orb_dir = -1.0 if facing_left else 1.0
+	var effective_left := facing_left != (global_scale.x < 0.0)
+	_orb_dir = -1.0 if effective_left else 1.0
 	_orb_elapsed_s = 0.0
 	_orb_active = true
-	projectile_fx.position = Vector2(_orb_origin_local.x * _orb_dir, _orb_origin_local.y)
-	projectile_fx.flip_h = facing_left
+	var abs_sc := Vector2(maxf(0.1, absf(global_scale.x)), maxf(0.1, absf(global_scale.y)))
+	projectile_fx.top_level = true
+	projectile_fx.global_position = global_position + Vector2(_orb_origin_local.x * _orb_dir * abs_sc.x, _orb_origin_local.y * abs_sc.y)
+	projectile_fx.scale = abs_sc
+	projectile_fx.flip_h = effective_left
 	projectile_fx.visible = true
 	projectile_fx.play("electric_orb_fx")
 
@@ -125,5 +130,7 @@ func _on_body_animation_finished() -> void:
 	if is_instance_valid(charge_fx):
 		charge_fx.visible = false
 		charge_fx.stop()
+	if is_instance_valid(sprite) and sprite.animation == &"ko":
+		return
 	if is_instance_valid(sprite) and sprite.sprite_frames and sprite.sprite_frames.has_animation(&"idle"):
 		sprite.play(&"idle")

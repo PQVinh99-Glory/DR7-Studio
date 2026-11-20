@@ -191,6 +191,7 @@ class TRexTurnContractTest(unittest.TestCase):
                 "scenes/CharacterFighter2D.gd",
                 "scenes/Chilopoda.tscn",
                 "scenes/ChilopodaFighter2D.gd",
+                "scenes/ChilopodaGroundClip.gdshader",
                 "scenes/TasmanianFighter2D.gd",
             }
             if rel.startswith(calibrated_prefixes) or rel in calibrated_files:

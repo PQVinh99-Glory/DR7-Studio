@@ -394,7 +394,8 @@
       <button class="tab-btn" data-tab="tab-arena">⚔️ 2. Sân Tập Gameplay Thực Chiến</button>
     </div>
     <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-      <a class="btn btn-gold" id="btnDownloadAndroidApkHeader" href="/api/download-android-debug.apk" download="dr7-studio-debug.apk" title="Tải nhanh APK Android Debug (arm64-v8a + x86_64) cài trực tiếp lên Redmi K70E">📱 Tải APK Android (.apk)</a>
+      <a class="btn btn-gold" id="btnDownloadAndroidApkHeader" href="/api/download-android-debug.apk" download="dr7-studio-debug.apk" title="Tải nhanh APK Android Debug (arm64-v8a) cài trực tiếp lên Redmi K70E">📱 Tải APK Android (.apk)</a>
+      <a class="btn" id="btnDownloadIosIpaHeader" href="/api/download-ios-unsigned.ipa" download="dr7-studio-unsigned.ipa" title="Tải nhanh iOS IPA (Sideloadly / AltStore / SideStore)">🍎 Tải IPA iOS (.ipa)</a>
       <a class="btn" href="/api/download-godot-pack.zip">📦 Tải Gói Godot 4 (.zip)</a>
     </div>
   </header>
@@ -433,7 +434,7 @@
             <div class="mode-card active" id="cardMode1Layer" data-arch="combined_1layer">
               <div class="title">✅ Gộp Chung 1 Lớp Nguyên Bản (<code>Combined 1-Layer</code>)</div>
               <div class="desc">
-                • <b>Engine chính thức</b>: <b>Godot 4</b> (Client Mobile APK/iOS + Scene/UI + <code>MultiMeshInstance2D</code>) + <b>Rust Core</b> (<code>GDExtension</code> / <code>WASM</code> / Spatial-Grid AoI Server) + <b>Supabase</b>.<br/>
+                • <b>Engine chính thức (ADR-0001)</b>: <b>Pha 1 (0đ)</b> — <b>Godot 4</b> (Client Mobile APK/iOS GDScript + <code>MultiMeshInstance2D</code> + Godot Headless <code>wss://</code> Server) + <b>Cloudflare Free Proxy/WAF</b> + <b>Supabase</b> (Auth/DB); <b>Pha 2 (Scale &gt;35k)</b> — <b>Rust Core Server</b> (<code>WASM</code> Preview / Spatial-Grid AoI VPS).<br/>
                 • <b>1 Quad / 1 Draw Call</b>: Bảo toàn 100% cấu trúc pixel gốc từ Atlas, tuyệt đối không cắt xẻ tách đa lớp làm sai lệch hình ảnh.
               </div>
             </div>
@@ -676,7 +677,8 @@
           <label style="display:inline-flex; align-items:center; gap:4px; cursor:pointer;" title="D2: Mặc định Fractional; bật để làm tròn xuống bội số nguyên (>=1080px, tự khóa ở 720p)"><input type="checkbox" id="chkPixelPerfect" /> 🔲 Pixel Perfect (Integer)</label>
           <label style="display:inline-flex; align-items:center; gap:4px; cursor:pointer;" title="Chạy bản export HTML5 thật của chính Godot 4.7 Compatibility"><input type="checkbox" id="chkGodotWebRuntime" /> 🎮 Godot Web Thật</label>
           <a class="btn" href="/godot-web/index.html" target="_blank" rel="noopener" title="Mở Godot toàn màn hình trên chính thiết bị để kiểm tra tỷ lệ và pixel thực">↗ Mở Godot trực tiếp</a>
-          <a class="btn btn-gold" id="btnDownloadAndroidApkArena" href="/api/download-android-debug.apk" download="dr7-studio-debug.apk" title="Tải nhanh APK Android Debug (arm64-v8a + x86_64) cài trực tiếp lên Redmi K70E">📱 Tải APK K70E (.apk)</a>
+          <a class="btn btn-gold" id="btnDownloadAndroidApkArena" href="/api/download-android-debug.apk" download="dr7-studio-debug.apk" title="Tải nhanh APK Android Debug (arm64-v8a) cài trực tiếp lên Redmi K70E">📱 Tải APK K70E (.apk)</a>
+          <a class="btn" id="btnDownloadIosIpaArena" href="/api/download-ios-unsigned.ipa" download="dr7-studio-unsigned.ipa" title="Tải nhanh iOS IPA (Sideloadly / AltStore / SideStore)">🍎 Tải IPA iOS (.ipa)</a>
           <label style="display:inline-flex; align-items:center; gap:4px; cursor:pointer;" title="Hiển thị đúng 1 CSS px = 1 canvas px (chưa tính devicePixelRatio của màn hình thật)"><input type="checkbox" id="chkNative1to1" /> 🖥️ 1 CSS px = 1 canvas px</label>
           <button class="btn" id="btnFullscreenArena" title="Mở rộng toàn màn hình để soi thực chiến">⛶ Toàn màn hình</button>
           <label style="display:inline-flex; align-items:center; gap:4px; cursor:pointer;"><input type="checkbox" id="chkSampleMap" checked /> 🏔️ Map Tile 2D</label>
@@ -833,7 +835,7 @@
         if (state.activeTab === 'tab-human') {
           renderInspector();
           renderDragonBallItemInspector();
-        } else if (state.activeTab === 'tab-arena') {
+        } else if (state.activeTab === 'tab-arena' && !(arena.useGodotWebRuntime && arena.godotWebReady)) {
           stepAndRenderArena(0);
         }
       };
@@ -925,8 +927,9 @@
         }
         state.terrain = bRes.terrain || null;
         arena.terrainPlatforms = Array.isArray(state.terrain?.platforms) ? state.terrain.platforms : [];
-        applyDeviceProfilesConfig(bRes.device_profiles, bRes.godot_web_ready);
+        applyDeviceProfilesConfig(bRes.device_profiles, bRes.godot_web_ready, bRes.godot_web_bootstrap);
         applyAndroidApkInfo(bRes.android_apk);
+        applyIosIpaInfo(bRes.ios_ipa);
         applyArenaStageConfig(bRes.arena_stage);
 
         if (wasmBytes) {
@@ -1036,7 +1039,7 @@
 
         renderInspector();
         renderDragonBallItemInspector();
-        stepAndRenderArena(16.67);
+        if (!(arena.useGodotWebRuntime && arena.godotWebReady)) stepAndRenderArena(16.67);
         requestAnimationFrame(mainLoop);
 
         // Preload remaining roster atlases & wings in gentle pairs of 2; avatars refresh as each resolves
@@ -2472,7 +2475,7 @@
         return { intent: 'busy', move_dir: 0, attack_clip: '', desired_face_left: faceLeft, edge_dist: edgeDist, reason: aiState.lastReason };
       }
 
-      // Special Case 1: Chilopoda reverses range roles (<50px -> power_up laser, >=50px -> attack_light burrow)
+      // Chilopoda fires at close range and burrows to reach distant targets.
       if (cid === 'chilopoda') {
         aiState.lightChainCount = 0;
         if (aiState.cooldownRemaining > 0) {
@@ -2482,7 +2485,7 @@
         }
         const chosen = edgeDist < closeEdge ? 'power_up' : lightClip;
         aiState.lastIntent = 'attack';
-        aiState.lastReason = edgeDist < closeEdge ? 'chilopoda_close_laser' : 'chilopoda_far_burrow';
+        aiState.lastReason = edgeDist < closeEdge ? 'chilopoda_close_power_up' : 'chilopoda_far_burrow';
         aiState.cooldownRemaining = attackCd;
         return { intent: 'attack', move_dir: 0, attack_clip: chosen, desired_face_left: faceLeft, edge_dist: edgeDist, reason: aiState.lastReason };
       }
@@ -2941,7 +2944,76 @@
       }
     }
 
-    function applyDeviceProfilesConfig(profilesDoc, godotWebReady = false) {
+    function applyIosIpaInfo(ipaInfo) {
+      const available = Boolean(ipaInfo && ipaInfo.available);
+      const url = (ipaInfo && ipaInfo.download_url) || '/api/download-ios-unsigned.ipa';
+      const filename = (ipaInfo && ipaInfo.filename) || 'dr7-studio-unsigned.ipa';
+      const sizeLabel = available && ipaInfo.size_mb ? `${ipaInfo.size_mb} MB` : '';
+      const shaShort = available && ipaInfo.sha256 ? String(ipaInfo.sha256).slice(0, 12) : '';
+      const builtAt = available && ipaInfo.built_at_utc ? ` | Build: ${ipaInfo.built_at_utc}` : '';
+      const targets = [
+        { id: 'btnDownloadIosIpaHeader', readyText: `🍎 Tải IPA iOS (${sizeLabel || '.ipa'})`, missingText: '🍎 Chưa có IPA' },
+        { id: 'btnDownloadIosIpaArena', readyText: `🍎 Tải IPA iOS (${sizeLabel || '.ipa'})`, missingText: '🍎 Chưa có IPA' },
+      ];
+      for (const spec of targets) {
+        const el = document.getElementById(spec.id);
+        if (!el) continue;
+        el.href = url;
+        el.download = filename;
+        el.textContent = available ? spec.readyText : spec.missingText;
+        el.title = available
+          ? `Tải ${filename} (${sizeLabel}, SHA ${shaShort}${builtAt}) cài lên iPhone bằng Sideloadly / AltStore / SideStore`
+          : 'Chưa có iOS IPA local — chạy 1 lần workflow Build iOS IPA, đặt base IPA vào build/ios/base/dr7-studio-base.ipa rồi chạy ./loop.sh build-all';
+        el.style.opacity = available ? '' : '0.55';
+        el.style.pointerEvents = available ? '' : 'none';
+        el.setAttribute('aria-disabled', available ? 'false' : 'true');
+      }
+    }
+
+    let _godotBootstrapPollTimer = null;
+
+    function updateGodotBootstrapHint(bootstrapStatus) {
+      const controlHint = document.getElementById('arenaControlHint');
+      if (!controlHint || !bootstrapStatus) return;
+      if (bootstrapStatus.state === 'bootstrapping') {
+        const stepMsg = bootstrapStatus.step === 'installing_godot_and_templates'
+          ? 'tải Godot 4.7.2 & Export Templates'
+          : (bootstrapStatus.step === 'exporting_godot_web' ? 'xuất bản Godot Web thật' : 'khởi tạo Godot Web thật');
+        controlHint.textContent = `⏳ Server đang tự động ${stepMsg}... Khung Godot Web thật sẽ tự mở ngay khi hoàn tất.`;
+      } else if (bootstrapStatus.state === 'error' && bootstrapStatus.error) {
+        controlHint.textContent = `⚠️ Tự động tải Godot Web gặp lỗi: ${bootstrapStatus.error}`;
+      }
+    }
+
+    function scheduleGodotBootstrapPoll() {
+      if (_godotBootstrapPollTimer || typeof fetch !== 'function') return;
+      _godotBootstrapPollTimer = setInterval(async () => {
+        try {
+          const st = await fetch('/api/godot-web-status').then(r => r.ok ? r.json() : null);
+          if (!st) return;
+          updateGodotBootstrapHint(st);
+          if (st.godot_web_ready) {
+            clearInterval(_godotBootstrapPollTimer);
+            _godotBootstrapPollTimer = null;
+            arena.godotWebReady = true;
+            arena.useGodotWebRuntime = true;
+            const chkGodot = document.getElementById('chkGodotWebRuntime');
+            if (chkGodot) {
+              chkGodot.disabled = false;
+              chkGodot.checked = true;
+            }
+            updateArenaFrameLayout();
+          } else if (st.state === 'error') {
+            clearInterval(_godotBootstrapPollTimer);
+            _godotBootstrapPollTimer = null;
+          }
+        } catch (_) {
+          // Ignore transient poll errors while server initializes
+        }
+      }, 2000);
+    }
+
+    function applyDeviceProfilesConfig(profilesDoc, godotWebReady = false, bootstrapStatus = null) {
       arena.godotWebReady = Boolean(godotWebReady);
       arena.useGodotWebRuntime = arena.godotWebReady;
       arena.deviceProfiles = Array.isArray(profilesDoc?.profiles) ? profilesDoc.profiles : [];
@@ -2966,9 +3038,13 @@
         chkGodot.disabled = !arena.godotWebReady;
         chkGodot.checked = arena.useGodotWebRuntime;
       }
+      if (!arena.godotWebReady && bootstrapStatus && bootstrapStatus.state === 'bootstrapping') {
+        updateGodotBootstrapHint(bootstrapStatus);
+        scheduleGodotBootstrapPoll();
+      }
     }
 
-    function updateArenaFrameLayout() {
+    function updateArenaFrameLayout(forceLoadGodotFrame = false) {
       const frame = document.getElementById('arenaPhoneFrame');
       const slot = document.getElementById('arenaScreenSlot');
       const bezelImg = document.getElementById('arenaPhoneBezelImg');
@@ -3011,7 +3087,8 @@
       if (godotFrame) {
         if (arena.useGodotWebRuntime && arena.godotWebReady) {
           godotFrame.style.display = 'block';
-          if (!godotFrame.src || !godotFrame.src.endsWith('/godot-web/index.html')) {
+          const shouldLoadFrame = forceLoadGodotFrame || state.activeTab === 'tab-arena';
+          if (shouldLoadFrame && (!godotFrame.src || !godotFrame.src.endsWith('/godot-web/index.html'))) {
             godotFrame.src = '/godot-web/index.html';
           }
         } else {
@@ -4157,8 +4234,8 @@
       // 3. Floating Damage / Burst Popups
       for (const p of arena.popups) {
         ctx.fillStyle = '#facc15';
-        ctx.font = 'bold 22px monospace';
-        ctx.fillText(p.text, p.x - 95, p.y);
+        ctx.font = 'bold 26px monospace';
+        ctx.fillText(p.text, p.x - 114, p.y);
       }
       ctx.restore();
 
@@ -4590,7 +4667,7 @@
           stepItemSparkle(dtMs);
           renderInspector();
           renderDragonBallItemInspector();
-        } else if (state.activeTab === 'tab-arena') {
+        } else if (state.activeTab === 'tab-arena' && !(arena.useGodotWebRuntime && arena.godotWebReady)) {
           stepAndRenderArena(dtMs, wallDtMs);
         }
       } catch (err) {
@@ -4610,18 +4687,21 @@
           document.getElementById(state.activeTab).classList.add('active');
           if (state.activeTab === 'tab-human') renderInspector();
           if (state.activeTab === 'tab-arena') {
-            const bd = state.terrain?.backdrop || {};
-            for (const u of [
-              arena.mapWebPath,
-              bd.bg_web_path,
-              bd.wing_left?.web_path,
-              bd.wing_right?.web_path,
-              state.terrain?.tileset?.web_path,
-              state.terrain?.dust_fx?.web_path,
-            ]) {
-              if (u && !state.images[u]) loadImage(u).catch(() => null);
+            updateArenaFrameLayout();
+            if (!(arena.useGodotWebRuntime && arena.godotWebReady)) {
+              const bd = state.terrain?.backdrop || {};
+              for (const u of [
+                arena.mapWebPath,
+                bd.bg_web_path,
+                bd.wing_left?.web_path,
+                bd.wing_right?.web_path,
+                state.terrain?.tileset?.web_path,
+                state.terrain?.dust_fx?.web_path,
+              ]) {
+                if (u && !state.images[u]) loadImage(u).catch(() => null);
+              }
+              stepAndRenderArena(16.67);
             }
-            stepAndRenderArena(16.67);
           }
         };
       });
@@ -4861,7 +4941,7 @@
       const chkPxPerf = document.getElementById('chkPixelPerfect');
       if (chkPxPerf) chkPxPerf.onchange = e => { arena.pixelPerfect = Boolean(e.target.checked); updateArenaFrameLayout(); };
       const chkGodotWeb = document.getElementById('chkGodotWebRuntime');
-      if (chkGodotWeb) chkGodotWeb.onchange = e => { arena.useGodotWebRuntime = Boolean(e.target.checked) && arena.godotWebReady; updateArenaFrameLayout(); };
+      if (chkGodotWeb) chkGodotWeb.onchange = e => { arena.useGodotWebRuntime = Boolean(e.target.checked) && arena.godotWebReady; updateArenaFrameLayout(arena.useGodotWebRuntime); };
       const chkNative = document.getElementById('chkNative1to1');
       if (chkNative) chkNative.onchange = e => { arena.native1to1 = Boolean(e.target.checked); updateArenaFrameLayout(); };
       const chkPin = document.getElementById('chkPinArenaStage');
@@ -4962,8 +5042,10 @@
       });
 
       window.addEventListener('keydown', ev => {
+        const tag = ev.target && ev.target.tagName ? ev.target.tagName : '';
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+        if (state.activeTab === 'tab-arena' && arena.useGodotWebRuntime && arena.godotWebReady) return;
         arena.keys[ev.code] = true;
-        if (ev.target.tagName === 'INPUT' || ev.target.tagName === 'TEXTAREA') return;
         if (ev.code === 'Space' && state.activeTab === 'tab-human') {
           ev.preventDefault();
           document.getElementById('btnPlayPause').click();

@@ -18,6 +18,7 @@ var status_label: Label = null
 var _pick_enabled: bool = false
 var _grid_enabled: bool = false
 var _last_copy_text: String = ""
+var _step_row: HBoxContainer = null
 
 
 func _ready() -> void:
@@ -108,17 +109,12 @@ func _build_ui() -> void:
 	set_a_btn.text = "📍 A = Player"
 	set_a_btn.pressed.connect(func() -> void: set_point_a_player_requested.emit())
 	row2.add_child(set_a_btn)
-
-	var snap1_btn := Button.new()
-	snap1_btn.text = "🧱 B = Bậc 1 (2850)"
-	snap1_btn.pressed.connect(func() -> void: snap_point_b_requested.emit(2850.0))
-	row2.add_child(snap1_btn)
-
-	var snap2_btn := Button.new()
-	snap2_btn.text = "🧱 B = Bậc 2 (3695)"
-	snap2_btn.pressed.connect(func() -> void: snap_point_b_requested.emit(3695.0))
-	row2.add_child(snap2_btn)
 	vbox.add_child(row2)
+
+	_step_row = HBoxContainer.new()
+	_step_row.add_theme_constant_override("separation", 6)
+	vbox.add_child(_step_row)
+	set_step_edges([2850.0, 3695.0, 4740.0, 5560.0])
 
 	readout_label = Label.new()
 	readout_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -153,6 +149,20 @@ func set_grid_enabled(enabled: bool) -> void:
 		grid_button.text = "📐 Lưới PX: BẬT" if enabled else "📐 Lưới PX: TẮT"
 
 
+func set_step_edges(edges: Array) -> void:
+	if _step_row == null:
+		return
+	for ch in _step_row.get_children():
+		ch.queue_free()
+	for i in range(edges.size()):
+		var ex := float(edges[i])
+		var btn := Button.new()
+		btn.text = "🧱 Bậc %d (%d)" % [i + 1, int(round(ex))]
+		btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		btn.pressed.connect(func() -> void: snap_point_b_requested.emit(ex))
+		_step_row.add_child(btn)
+
+
 func apply_safe_area(insets: Dictionary) -> void:
 	if panel == null:
 		return
@@ -180,7 +190,7 @@ func update_metrics(metrics: Dictionary) -> void:
 	var cam_z := float(metrics.get("camera_zoom", 1.0))
 	var vis: Array = metrics.get("visible_logic_size", [1920.0, 1080.0])
 	var cam_p: Array = metrics.get("camera_pos", [960.0, 540.0])
-	var screen_factor := eff_sc / maxf(0.01, cam_z)
+	var screen_factor := eff_sc * maxf(0.01, cam_z)
 
 	var lines := PackedStringArray()
 	if bool(metrics.get("has_a", false)) and bool(metrics.get("has_b", false)):

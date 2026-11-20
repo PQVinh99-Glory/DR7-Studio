@@ -43,6 +43,7 @@ var _drop_elapsed_s: float = 0.0
 var _drop_peak_y: float = 830.0
 var _drop_land_x: float = 0.0
 var _drop_target_x: float = 0.0
+var ground_y_resolver: Callable = Callable()
 
 var _collect_elapsed_s: float = 0.0
 var _collect_start_pos: Vector2 = Vector2.ZERO
@@ -221,16 +222,27 @@ func step_lifecycle(delta: float) -> void:
 			drop_subphase = "roll"
 			var u := clampf((_drop_elapsed_s - t_land) / maxf(0.001, _roll_duration_s), 0.0, 1.0)
 			var ease_u := 1.0 - (1.0 - u) * (1.0 - u)
-			position = Vector2(
-				lerpf(_drop_land_x, _drop_target_x, ease_u),
-				_drop_ground_y
-			)
+			var rx := lerpf(_drop_land_x, _drop_target_x, ease_u)
+			var ry := float(ground_y_resolver.call(rx)) if ground_y_resolver.is_valid() else _drop_ground_y
+			if ry < _drop_ground_y - 4.0:
+				# Stop horizontal roll against solid upward step cliff instead of rolling underground.
+				rx = position.x
+				_drop_target_x = position.x
+			else:
+				_drop_ground_y = maxf(_drop_ground_y, ry)
+			position = Vector2(rx, _drop_ground_y)
 			if is_instance_valid(body_sprite):
-				body_sprite.position = Vector2(0.0, -16.0)
-				body_sprite.offset = Vector2(-16.0, -16.0)
+				var half_h := _map_anchor_px.y * 0.5
+				body_sprite.position = Vector2(0.0, -half_h)
+				body_sprite.offset = Vector2(-_map_anchor_px.x, -half_h)
 				body_sprite.rotation = _drop_dir * _roll_angle_rad * ease_u
 		else:
-			position = Vector2(_drop_target_x, _drop_ground_y)
+			var final_ry := float(ground_y_resolver.call(_drop_target_x)) if ground_y_resolver.is_valid() else _drop_ground_y
+			if final_ry >= _drop_ground_y - 4.0:
+				_drop_ground_y = maxf(_drop_ground_y, final_ry)
+				position = Vector2(_drop_target_x, _drop_ground_y)
+			else:
+				position = Vector2(position.x, _drop_ground_y)
 			lifecycle_state = "resting"
 			drop_subphase = "rest"
 			_apply_state()

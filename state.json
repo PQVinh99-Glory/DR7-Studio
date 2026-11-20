@@ -1,9 +1,9 @@
 {
   "schema": "dr7-studio.state.v1",
-  "updated_at": "2026-11-17T12:28:56Z",
+  "updated_at": "2026-11-19T13:58:02Z",
   "project": {
     "name": "DR7-Studio — Dragon Ball 2D",
-    "version": "0.16.0",
+    "version": "0.17.0",
     "version_history": [
       {
         "version": "0.1.0",
@@ -91,6 +91,11 @@
         "summary": "Owner-approved Bat turn-v1 (PIPE-009): 5 whole-body perspective turn poses (ticks [5,4,3,4,5]), outer white rim & turn_01 pocket cleanup, bidirectional & two-endpoint runtime while preserving v0.10.0 61 frames/FX and Chilopoda v0.11.1. Turn TODO 1/4 complete; starting T-rex audit."
       },
       {
+        "version": "0.12.0",
+        "date": "2026-11-15T06:00:00Z",
+        "summary": "Owner chốt toàn bộ 8 nhân vật (PIPE-011..PIPE-016): Spinosaurus walk-edge-uniform-v1, Tasmanian King Crab uniform-color-v1, Sarcosuchus, Dilophosaurus, Chilopoda fireball-v1, Bat calibration-v1 & 16:9 calibration (docs/releases/v0.12.0-all-characters-finalization.json)."
+      },
+      {
         "version": "0.13.0",
         "date": "2026-11-15T12:36:59.698744+00:00",
         "summary": "Owner nghiệm thu Shenron idle-v5-hover và combo gọi7ngọc/two flashes/pixel ground/persistent aura. PIPE-017."
@@ -114,6 +119,11 @@
         "version": "0.16.0",
         "date": "2026-11-16T15:29:15Z",
         "summary": "Owner chốt chính thức Floating Camera (PIPE-021): quái bay 70x74 1-pass Nearest, nối pha idle<->walk, bắn projectile_fx độc lập +X, AI attack_light fallback, xóa review/ + /work + file tạm root và đóng gói Web/Android APK 1:1."
+      },
+      {
+        "version": "0.17.0",
+        "date": "2026-11-19T13:57:00Z",
+        "summary": "Owner chốt v0.17.0: Alpha Login (AppStartup + Splash + LoginScreen kính mờ viền bạc + Loading 7 Ngọc Rồng + Supabase Auth cho vinhadmin/Vinh & thaiadmin/Thái), Godot 4.7.2 Headless Dedicated Server + Cloudflare R2/DO Staging 0đ (triệt cache PWA SW cũ qua /play/v/<pck_hash12>/ & SW tự xóa cache), sửa đồng bộ PvE/PvP online + hàng chờ power_up Mana + giao cắt địa hình liên tục 4 bậc, và chuẩn hóa Hit Effect mặc định 7 frame assets/fx/hit_impact/ (melee 144px / heavy 216px) cho toàn bộ tướng/quái/boss."
       }
     ],
     "genre": "2D Dragon Ball Real-Time Mass Action / RPG",
@@ -123,7 +133,7 @@
       "iOS Mobile (.ipa)",
       "Web Compatibility Sandbox (localhost:8080)"
     ],
-    "backend": "Pha 1 (0d): Supabase (JWT Auth + ghi Postgres theo lo) + Cloudflare Free Proxy/WAF (chan IP VN/JP) + Godot Headless WebSocket Server (wss:// 443); Pha 2: Rust Core Server (engines/rust_combat_sim) tren VPS (ADR-0001)",
+    "backend": "Pha 1 (0d): Supabase (JWT Auth bat buoc xac thuc Gmail 100% tai khoan + ghi Postgres theo lo) + Cloudflare Free Proxy/WAF (JP chan cung 100% tim kiem/tai ve/Client/Server; VN chan tim kiem & tai ve nhung mo Client/Server) + Godot Headless WebSocket Server (wss:// 443); Pha 2: Rust Core Server (engines/rust_combat_sim) tren VPS (ADR-0001)",
     "engine_evaluation": {
       "status": "approved_phased_roadmap_adr_0001",
       "phase_1": "Godot 4.7.2 GDScript (GL Compatibility, Combined 1-Layer) Client + Godot Headless WebSocket Server + Supabase Auth/DB + Cloudflare WAF/Proxy (0d, <=50 thuc the/khu)",
@@ -152,19 +162,13 @@
     "version_file": "VERSION"
   },
   "current_focus": {
-    "active_task_id": "COMBAT-005",
+    "active_task_id": "RELEASE-V0.17.0",
     "status": "completed",
-    "summary": "Giảm thêm 20% hiệu ứng rung (tướng/quái/boss, HIT_SHAKE_SCALE_MUL=0.80) và 20% lóa sáng trúng đòn (HIT_FLASH_BRIGHTNESS_MUL=0.64, HIT_FLASH_ALPHA_MUL=0.80, draw_hit_impact lum=0.64); đồng bộ Web + APK + localhost",
+    "summary": "Chốt chính thức v0.17.0: đồng bộ SemVer (VERSION/state.json/project.godot/Cargo.toml/export_presets.cfg), triệt lỗi PWA SW cache-first trên Cloudflare staging (/play/v/<pck_hash12>/ + SW tự xóa cache + no-store), kiểm thử full ./loop.sh test & build-all 1:1 Web/APK/IPA, commit + tag v0.17.0 và deploy Cloudflare R2 staging",
     "next_steps_summary": [
       "11/11 nhân vật đã hoàn thiện & chốt trên main; sẵn sàng nhận concept/sheet nhân vật, item hoặc map mới từ Owner."
     ],
-    "review_artifacts": [
-      "assets/floating_camera/owner_approval.json",
-      "docs/characters/floating-camera-70x74-qa.json",
-      "docs/releases/v0.16.0-release-finalization.json",
-      "scenes/FloatingCamera.tscn",
-      "scenes/FloatingCameraFighter2D.gd"
-    ],
+    "review_artifacts": [],
     "preview_url": "http://localhost:8080/?tab=arena"
   },
   "open_issues": [],
@@ -1081,6 +1085,156 @@
       "timestamp": "2026-11-17T12:28:56Z",
       "status": "completed",
       "summary": "Giảm thêm 20% hiệu ứng rung (tướng/quái/boss, HIT_SHAKE_SCALE_MUL=0.80) và 20% lóa sáng trúng đòn (HIT_FLASH_BRIGHTNESS_MUL=0.64, HIT_FLASH_ALPHA_MUL=0.80, draw_hit_impact lum=0.64); đồng bộ Web + APK + localhost"
+    },
+    {
+      "id": "LOCAL-001",
+      "timestamp": "2026-11-18T06:01:46Z",
+      "status": "completed",
+      "summary": "Khởi chạy preview localhost:8080; HTTP GET / trả 200."
+    },
+    {
+      "id": "MAP-RIVER-EXTENSION",
+      "timestamp": "2026-11-18T07:31:00Z",
+      "status": "human_test_pending",
+      "summary": "Review map +1800px, hai bậc X4877/X5643, 2 quái bộ + 2 quái bay, 3 cây tiền cảnh; Godot Web/APK export và ./loop.sh test exit 0; chờ Owner xem seam trên K70E."
+    },
+    {
+      "id": "MAP-STEP-EDGE-FIX",
+      "timestamp": "2026-11-18T09:31:44Z",
+      "status": "ready_for_owner_human_test",
+      "summary": "Hoan thien review map noi sau mat san combined-depth-review.png (hieu chuan duong noi x=4800), 3 cay tren dai co sau X4940/5420/6050 khong cat tan/choi, va HUD MobileActionPad theo image copy 8.png (analog, nut hanh dong vector + vong xanh, mini-map khong de nut); dong bo Godot Web + Android APK cho Owner Human Test."
+    },
+    {
+      "id": "MAP-STEP-CLIFF-TREES-FX",
+      "timestamp": "2026-11-18T11:08:46Z",
+      "status": "ready_for_owner_human_test",
+      "summary": "Chuan hoa mat cat 2.5D 4 bac (wall_x=[2876,3724,4778,5582] + wall_pad<=48 + truot mep roi), xuat planted-trees-review.png co re cam dat cho 3 cay, xoa mini-map WorldPositionMap, giam 40% tuong phan hit-flash/blink (0.60) va nang cap FX va cham danh thuong (melee) & danh nang (heavy); dong bo Web + APK + localhost:8080 cho Owner Human Test."
+    },
+    {
+      "id": "MAP-TREE-REPOSITION",
+      "timestamp": "2026-11-18T11:37:01Z",
+      "status": "ready_for_owner_human_test",
+      "summary": "Dua cay #1 len buc trai cach mat cat bac 3 ~30px (X=4695), ha toan bo 3 cay xuong +20px (Y=[828,888,954]) va dong bo Web + APK + localhost:8080."
+    },
+    {
+      "id": "MAP-TREE-CANOPY-PLUS30",
+      "timestamp": "2026-11-18T11:48:19Z",
+      "status": "ready_for_owner_human_test",
+      "summary": "Tang kich thuoc tan la cua ca 3 cay len +30% trong planted-trees-review.png (2027x1088, chuyen tiep muot ve than/re 1.0x), cap nhat ArenaSandbox + test_arena_sandbox + dong bo Web, APK & localhost:8080."
+    },
+    {
+      "id": "DAMAGE-POPUP-PLUS20",
+      "timestamp": "2026-11-18T12:21:03Z",
+      "status": "ready_for_owner_human_test",
+      "summary": "Tang kich thuoc diem sat thuong noi them 20% (FLOATING_DAMAGE_FONT_SIZE=24/outline=5 trong OverheadBarsDraw.gd va 26px trong tools/preview/index.html), cap nhat test & dong bo Web, APK, localhost:8080."
+    },
+    {
+      "id": "MONSTER-RESPAWN-12S",
+      "timestamp": "2026-11-18T12:39:17Z",
+      "status": "ready_for_owner_human_test",
+      "summary": "Tang thoi gian quai hoi sinh trong FieldCombatManager.gd tu 7.0s len 12.0s (RESPAWN_MONSTER_DELAY_S=12.0), cap nhat test_arena_sandbox.gd va dong bo Web + APK."
+    },
+    {
+      "id": "BOSS-DRUM-MAP-EVENT",
+      "timestamp": "2026-11-18T12:58:03Z",
+      "status": "ready_for_owner_human_test",
+      "summary": "Cấu hình Boss Map Drum: đếm 5' (300s) khi có Tướng Player trong map, hồi sinh 30' (1800s) sau KO; HP=5000, Stamina=200, light_dmg=120, power_dmg=220, scale=2.5, Z=30; tên Drum màu đỏ + thanh máu đỏ 152x17px; teleport đến cạnh Tướng khi xuất hiện & tấn công/truy đuổi toàn map bằng UtilityAI; drop Ngọc Rồng 100%; nút ⚡ Gọi Boss Drum trong Sân Tập."
+    },
+    {
+      "id": "SERVER-AUTO-GODOT-WEB",
+      "timestamp": "2026-11-19T01:05:21Z",
+      "status": "completed",
+      "summary": "Thiết lập mặc định mỗi lần khởi chạy server (./loop.sh serve / tools/preview/server.py) tự kiểm tra và tải Godot 4.7.2 + Export Templates (--with-templates) + xuất build/web/index.html để luôn mở được Godot Web thật; bổ sung /api/godot-web-status, auto-poll bật khung Godot Web trên index.html, build/.gdignore và unit test; cài Android SDK + build đồng bộ Web & APK 99.3MB."
+    },
+    {
+      "id": "AUDIT-FIX-PACK-1-TO-4",
+      "timestamp": "2026-11-19T03:31:42Z",
+      "status": "ready_for_owner_human_test",
+      "summary": "Hoàn tất Gói 1+2+3+4: backup tag/branch pre-cleanup; sửa trọn bộ A1-A14 (Boss Drum no-leak/full-map AI/shadow/HUD click-through, Drum KO hold, Chilopoda 1 fireball + burrow clamp, Mobile Multi-Touch Analog, Z-index stacking, DragonBall prune/roll, attack_heavy + dynamic FX, FX cache, 4-step ruler, WebSocket first-frame auth); chốt map 4 bậc & cây tiền cảnh sang assets/maps/rocky_plateau/ và dọn review/rocky_plateau_extension/; tối ưu APK 99.3MB->49MB & Web .pck 45.2MB->22MB; thêm preset iOS + PWA Safari + workflow build-ios-ipa.yml; nâng độ sáng hit-flash +40%; cài numpy/Pillow/scipy + script tools/infra/install_cloud_clis.sh (supabase 3.2.0, wrangler 4.165.0); đề xuất ADR-0002 thanh toán tự động; full ./loop.sh test PASS 100%."
+    },
+    {
+      "id": "IOS-SIDELOAD-I18N-CONFIG",
+      "timestamp": "2026-11-19T04:39:22Z",
+      "status": "ready_for_owner_human_test",
+      "summary": "Cấu hình đầy đủ Sideloadly / AltStore / SideStore (tools/ios/generate_altstore_source.py, tools/ios/repack_ios_pck.sh, docs/ios/sideload-and-testflight-setup.md, cập nhật .github/workflows/build-ios-ipa.yml hỗ trợ altstore-source.json + GitHub Pre-Release & sẵn sàng TestFlight Internal/External); chốt gói 5 ngôn ngữ chuẩn (en mặc định chỉ đổi trong Cài đặt, zh-CN, vi, es, pt-BR) tại assets/i18n/languages.json; cập nhật ADR-0002 (PENDING) chỉ dùng PayPal & ví quốc tế, loại cổng thanh toán VN."
+    },
+    {
+      "id": "FLEX-IOS-SYNC-AND-GEO-GMAIL-POLICY",
+      "timestamp": "2026-11-19T05:03:16Z",
+      "status": "ready_for_owner_human_test",
+      "summary": "Bỏ khóa cứng TestFlight trong build-ios-ipa.yml (hỗ trợ unsigned_sideload / signed_adhoc_ota / signed_appstore_testflight + cache Godot tiết kiệm phút macOS); chuẩn hóa 1 lệnh ./loop.sh build-all & ./loop.sh ios-repack đồng bộ Web + APK + IPA ngay trên localhost:8080 (thêm nút 🍎 Tải IPA iOS, /api/download-ios-unsigned.ipa, /api/ios-altstore-source.json); cập nhật AGENTS.md Điều 4, ADR-0001 & state.json (JP chặn cứng 100% tìm kiếm/tải về/Client/Server; VN chặn tìm kiếm & tải về nhưng mở Client/Server; bắt buộc xác thực Gmail 100% tài khoản)."
+    },
+    {
+      "id": "AUDIT-FIXES-BATCH-1-2-3",
+      "timestamp": "2026-11-19T07:18:28Z",
+      "status": "completed",
+      "summary": "Giữ kết quả ba đợt audit. Sửa bổ sung Field Mode để Chilopoda dùng burrow dưới ngưỡng cận chiến 50 px và power_up ở xa trong vùng aggro. Regression hai khoảng hở và toàn bộ ./loop.sh test đạt exit 0 (82 Python/JS-WASM, 12 Godot Headless, 2 OpenGL3, 3 Rust)."
+    },
+    {
+      "id": "AUDIT-V016-BUILD-RECOVERY",
+      "timestamp": "2026-11-19T07:18:29Z",
+      "status": "pending_owner_k70e_human_test",
+      "summary": "Backup f52fc15 đã xác minh trên origin/main. Web và APK v0.16.0 build thành công. Chromium chạy Godot Web tại localhost:8080, APK được apksigner xác minh và 9 tài nguyên trùng SHA-256 giữa Web, APK và pack iOS. Chưa có IPA nền, workflow unsigned trả HTTP 403 Resource not accessible by integration. ADB chưa thấy K70E."
+    },
+    {
+      "id": "CHILOPODA-RANGE-IOS-XCODE",
+      "timestamp": "2026-11-19T07:48:26Z",
+      "status": "pending_owner_k70e_human_test",
+      "summary": "Owner chọn Chilopoda gần power_up, xa burrow áp sát. ./loop.sh test đủ suite exit 0. Web/APK v0.16.0 đã rebuild, Chromium chạy Godot Web và chữ ký APK hợp lệ. Workflow macOS 44481956784 trên fix/ios-xcode-export e879602 đã pass export Team ID và archive unsigned. Đã kiểm SHA của IPA nền, repack workspace và xác minh Mach-O, bundle ID, version và PCK. 10 tài nguyên khớp SHA giữa Web/APK/IPA. Chờ Owner test trực tiếp trên K70E và iOS."
+    },
+    {
+      "id": "SYSTEM-LOGIC-REVIEW-V016",
+      "timestamp": "2026-11-19T08:06:18Z",
+      "status": "completed",
+      "summary": "Rà soát logic workspace v0.16.0, chỉ báo cáo không sửa gameplay. ./loop.sh test exit 0 đủ suite. Probe tái hiện power_up mất 100 Mana khi bị teleport ghi đè, segment qua mép địa hình bị bỏ lọt, snapshot tick 19 đè tick 20 và đổi khu offline xóa state. Transport/locale chưa nối đủ runtime. QA K70E/iOS thực và đo frame time còn chờ Owner."
+    },
+    {
+      "id": "ALPHA-LOGIN-CLOUDFLARE-HANDOFF",
+      "timestamp": "2026-11-19T08:53:15Z",
+      "status": "completed",
+      "summary": "Đã viết docs/alpha-login-cloudflare-handoff.md, làm rõ báo cáo Drum/va chạm và chia đợt fix, login hai tài khoản, splash/loading, Wrangler, host Godot Headless, đóng gói và nghiệm thu. Chưa sửa code hay deploy."
+    },
+    {
+      "id": "ALPHA-LOCAL-TEST-CREDENTIALS",
+      "timestamp": "2026-11-19T08:55:47Z",
+      "status": "completed",
+      "summary": "Đã cập nhật hai mật khẩu test trong .env cục bộ theo yêu cầu Owner và ghi chú bàn giao. Chưa provision hoặc đổi tài khoản trên Supabase."
+    },
+    {
+      "id": "ALPHA-4-PHASE-ROLLOUT",
+      "timestamp": "2026-11-19T09:43:18Z",
+      "status": "completed",
+      "summary": "Hoàn tất đủ 4 đợt theo docs/alpha-login-cloudflare-handoff.md: (1) Sửa lỗi trừ oan 100 Mana hàng chờ Drum và giao cắt địa hình liên tục terrain_blocks_segment + bảo vệ .env/ảnh root; (2) Thêm AppStartup, Boot Splash, LoginScreen kính mờ viền bạc (cover không dải đen) và DragonBallLoadingOverlay 7 sao 1->7->1; (3) Provision 2 tài khoản staging Supabase (vinhadmin=Vinh, thaiadmin=Thái, mặc định Drum), siết ZoneClientSync/WebSocketTransport, dựng Godot 4.7.2 Headless Server thật (PvP 2 Drum + PvE quái + đổi khu + reconnect) pass E2E 2 client; (4) Build 1:1 Web/APK/IPA unsigned, tạo R2 dr7-alpha-artifacts đẩy toàn bộ binary >25MiB và deploy Worker https://dr7-alpha-staging.hem-tra.workers.dev, đối chiếu 100% SHA-256 tải thật và live /api/alpha/login (GODOT_WS_ORIGIN chờ host/tunnel public, không dùng mock)."
+    },
+    {
+      "id": "ALPHA-LOGIN-BG-AND-WSS-FIX",
+      "timestamp": "2026-11-19T10:03:08Z",
+      "status": "completed",
+      "summary": "Đã sửa dứt điểm 2 lỗi Owner báo: (1) Sửa LoginScreen/DragonBallLoadingOverlay/AppStartup đồng bộ kích thước viewport dưới CanvasLayer + lọc safe_area cho mobile (xác minh render OpenGL3 hiện trọn ảnh nền cover + panel kính mờ chính giữa, thêm regression vào test_alpha_login_and_sync.gd); (2) Kích hoạt Cloudflare Free SQLite Durable Object ZoneRoomDO làm staging relay /ws (minh bạch ws_backend=cloudflare_do_staging_relay khi chưa gắn GODOT_WS_ORIGIN), rebuild 1:1 Web/APK/IPA, đẩy R2 & deploy Worker, xác minh thực tế AppStartup đăng nhập thật vào Arena và 2 client Vinh & Thái PvP/PvE qua wss://dr7-alpha-staging.hem-tra.workers.dev/ws."
+    },
+    {
+      "id": "ALPHA-SUPABASE-PWD-FORMAT-FIX",
+      "timestamp": "2026-11-19T10:13:32Z",
+      "status": "completed",
+      "summary": "Đã sửa lỗi tách định dạng <username>_<password> cho USER_1/USER_2 trong provision_supabase_alpha_users.py và cập nhật lại mật khẩu 6 ký tự chuẩn trên Supabase cho vinhadmin (Vinh) & thaiadmin (Thái); xác minh live /api/alpha/login & AppStartup.tscn vào thẳng Arena (exit 0)."
+    },
+    {
+      "id": "ALPHA-ONLINE-PVE-SYNC-FIX",
+      "timestamp": "2026-11-19T10:45:22Z",
+      "status": "completed",
+      "summary": "Đã sửa dứt điểm 4 lỗi online Field Mode trên bản Cloudflare APK/Web (đánh quái không mất máu, không tăng Mana, Drum không mất máu khi không bất tử, đánh quái chưa chết đã rơi ngọc): đồng bộ 100% 14 slot quái g0..f6 (loài, HP, vùng tuần tra zmin..zmax) giữa FieldCombatManager, ZoneRoomDO và headless_zone_server; chuyển combat_action(power_up) sang đúng lúc cầu điện va chạm; bổ sung player_pve_state đồng bộ HP/KO PvE lên server; chặn snapshot cũ kéo lùi HP/Mana hoặc hồi sinh zombie quái đã chết; build lại 1:1 Web/APK/IPA và đẩy lại R2 + Worker."
+    },
+    {
+      "id": "DEFAULT-HIT-IMPACT-FX",
+      "timestamp": "2026-11-19T13:03:33Z",
+      "status": "completed",
+      "summary": "Tạo gói sprite 7 frame assets/fx/hit_impact/ từ mẫu image copy 2.png (frame đầu gốc + 6 frame bung nổ tan dần, 1 trang 896x128 60Hz Nearest), áp dụng mặc định cho đánh thường (144px) và đánh nặng (216px) trên toàn bộ tướng/quái/boss (hỗ trợ custom override riêng), cập nhật AGENTS.md Điều 7.1, loại image copy 2.png khỏi export_presets.cfg, vượt ./loop.sh test (exit 0), build 1:1 Web/APK/IPA và deploy đồng bộ lên Cloudflare R2 staging"
+    },
+    {
+      "id": "RELEASE-V0.17.0",
+      "timestamp": "2026-11-19T13:58:02Z",
+      "status": "completed",
+      "summary": "Chốt chính thức v0.17.0: đồng bộ SemVer (VERSION/state.json/project.godot/Cargo.toml/export_presets.cfg), triệt lỗi PWA SW cache-first trên Cloudflare staging (/play/v/<pck_hash12>/ + SW tự xóa cache + no-store), kiểm thử full ./loop.sh test & build-all 1:1 Web/APK/IPA, commit + tag v0.17.0 và deploy Cloudflare R2 staging"
     }
   ],
   "quick_resume_commands": [
@@ -1413,5 +1567,5 @@
     "owner_approved": true,
     "floating_camera_in_roster": true
   },
-  "last_updated_utc": "2026-11-16T15:29:15Z"
+  "last_updated_utc": "2026-11-19T13:58:02Z"
 }

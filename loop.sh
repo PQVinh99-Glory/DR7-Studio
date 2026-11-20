@@ -170,6 +170,14 @@ if rust_cargo.exists():
     if f'version = "{ver_txt}"' not in ct:
         errors.append(f"engines/rust_combat_sim/Cargo.toml chưa đồng bộ version = \"{ver_txt}\"")
 
+export_presets = root / "export_presets.cfg"
+if export_presets.exists():
+    ep = export_presets.read_text(encoding="utf-8")
+    if f'version/name="{ver_txt}"' not in ep:
+        errors.append(f"export_presets.cfg (Android) chưa đồng bộ version/name=\"{ver_txt}\"")
+    if f'application/short_version="{ver_txt}"' not in ep:
+        errors.append(f"export_presets.cfg (iOS) chưa đồng bộ application/short_version=\"{ver_txt}\"")
+
 # 4. skills.md & lerning.md structural markers
 for fname, s_tag, e_tag in [
     ("skills.md", "<!-- SKILLS_ENTRIES_START -->", "<!-- SKILLS_ENTRIES_END -->"),
@@ -179,6 +187,19 @@ for fname, s_tag, e_tag in [
         txt = (root / fname).read_text(encoding="utf-8")
         if s_tag not in txt or e_tag not in txt:
             errors.append(f"{fname} thiếu cặp thẻ đánh dấu {s_tag} ... {e_tag}")
+        elif fname == "lerning.md":
+            m_lr = re.search(rf"{re.escape(s_tag)}(.*?){re.escape(e_tag)}", txt, re.S)
+            if m_lr:
+                inside_ids = re.findall(r"^###\s+\[(LRN-\d+)\]", m_lr.group(1), re.M)
+                all_ids = re.findall(r"^###\s+\[(LRN-\d+)\]", txt, re.M)
+                if len(inside_ids) != len(all_ids):
+                    errors.append(
+                        f"lerning.md có {len(all_ids) - len(inside_ids)} bài học nằm ngoài thẻ {e_tag}"
+                    )
+                if len(all_ids) != len(set(all_ids)):
+                    seen = set()
+                    dups = sorted({x for x in all_ids if x in seen or seen.add(x)})
+                    errors.append(f"lerning.md bị trùng mã bài học: {dups}")
 
 # 5. Validate Engine ⇄ Localhost Zero-Drift Parity & Animation Completeness Gate
 sys.path.insert(0, str(root / "tools" / "preview"))
@@ -242,6 +263,7 @@ st = json.loads(st_path.read_text(encoding="utf-8"))
 now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 st["updated_at"] = now_iso
+st["last_updated_utc"] = now_iso
 st["current_focus"]["active_task_id"] = tid
 st["current_focus"]["status"] = tstatus
 st["current_focus"]["summary"] = tsum
@@ -269,6 +291,11 @@ PY
 
   web-export)
     mkdir -p "$ROOT_DIR/build/web"
+    touch "$ROOT_DIR/build/.gdignore"
+    if [ ! -x "$ROOT_DIR/tools/godot/godot" ] || [ ! -f "$HOME/.local/share/godot/export_templates/4.7.2.stable/web_nothreads_release.zip" ]; then
+      echo "[loop.sh] Đang tự động tải Godot 4.7.2 + Export Templates cho Godot Web..."
+      bash "$ROOT_DIR/tools/godot/install_godot.sh" --with-templates
+    fi
     echo "[loop.sh] Importing & exporting Godot 4.7.2 Web (Compatibility)..."
     "$ROOT_DIR/tools/godot/godot" --headless --path "$ROOT_DIR" --editor --import >/dev/null
     "$ROOT_DIR/tools/godot/godot" --headless --path "$ROOT_DIR" --export-release "Web" "$ROOT_DIR/build/web/index.html"
@@ -287,13 +314,64 @@ PY
 
   apk-debug)
     mkdir -p "$ROOT_DIR/build/android"
+    touch "$ROOT_DIR/build/.gdignore"
+    if [ ! -x "$ROOT_DIR/tools/godot/godot" ] || [ ! -f "$HOME/.local/share/godot/export_templates/4.7.2.stable/android_debug.apk" ]; then
+      echo "[loop.sh] Đang tự động tải Godot 4.7.2 + Export Templates cho Android APK..."
+      bash "$ROOT_DIR/tools/godot/install_godot.sh" --with-templates
+    fi
     echo "[loop.sh] Importing & exporting Godot 4.7.2 Android Debug APK..."
     "$ROOT_DIR/tools/godot/godot" --headless --path "$ROOT_DIR" --editor --import >/dev/null
     "$ROOT_DIR/tools/godot/godot" --headless --path "$ROOT_DIR" --export-debug "Android" "$ROOT_DIR/build/android/dr7-studio-debug.apk"
     echo "[OK] Android APK xuất xong tại build/android/dr7-studio-debug.apk"
     ;;
 
+  ios-repack)
+    shift || true
+    BASE_IPA="${1:-$ROOT_DIR/build/ios/base/dr7-studio-base.ipa}"
+    OUT_IPA="$ROOT_DIR/build/ios/dr7-studio-unsigned.ipa"
+    APP_VER="$(tr -d '[:space:]' < "$ROOT_DIR/VERSION")"
+    if [ ! -f "$BASE_IPA" ]; then
+      echo "[WARN] Chưa có base iOS IPA tại: $BASE_IPA" >&2
+      echo "       Hãy chạy 1 lần workflow GitHub Actions 'Build iOS IPA' (signing_mode=unsigned_sideload)," >&2
+      echo "       tải file .ipa nền đặt vào build/ios/base/dr7-studio-base.ipa rồi chạy lại './loop.sh ios-repack' hoặc './loop.sh build-all'." >&2
+      exit 2
+    fi
+    bash "$ROOT_DIR/tools/ios/repack_ios_pck.sh" "$BASE_IPA" "$OUT_IPA"
+    BASE_HOST="${DR7_ALTSTORE_BASE_URL:-http://localhost:8080}"
+    python3 "$ROOT_DIR/tools/ios/generate_altstore_source.py" \
+      --version "$APP_VER" \
+      --ipa "$OUT_IPA" \
+      --download-url "${BASE_HOST}/api/download-ios-unsigned.ipa" \
+      --source-url "${BASE_HOST}/api/ios-altstore-source.json" \
+      --icon-url "${BASE_HOST}/assets/app_icon/icon_512.png" \
+      --output "$ROOT_DIR/build/ios/altstore-source.json"
+    echo "[OK] iOS IPA đồng bộ sẵn sàng tại $OUT_IPA"
+    ;;
+
+  build-all)
+    echo "[loop.sh] === Đồng bộ 1:1 Web + Android APK + iOS IPA (Localhost Human Test) ==="
+    "$ROOT_DIR/loop.sh" web-export
+    "$ROOT_DIR/loop.sh" apk-debug
+    if [ -f "$ROOT_DIR/build/ios/base/dr7-studio-base.ipa" ]; then
+      "$ROOT_DIR/loop.sh" ios-repack "$ROOT_DIR/build/ios/base/dr7-studio-base.ipa"
+    else
+      echo "[INFO] Bỏ qua repack iOS IPA tự động vì chưa có build/ios/base/dr7-studio-base.ipa (cần tải 1 lần từ GitHub Actions macos-latest)."
+    fi
+    echo "[loop.sh] === Tóm tắt SHA-256 đồng bộ bản build ==="
+    sha256sum "$ROOT_DIR/build/web/index.pck" "$ROOT_DIR/build/android/dr7-studio-debug.apk"
+    if [ -f "$ROOT_DIR/build/ios/dr7-studio-unsigned.ipa" ]; then
+      sha256sum "$ROOT_DIR/build/ios/dr7-studio-unsigned.ipa"
+    fi
+    ;;
+
+  serve)
+    shift
+    exec python3 "$ROOT_DIR/tools/preview/server.py" "$@"
+    ;;
+
   test)
+    RAN_SUITES=("Governance" "Python")
+    SKIPPED_SUITES=()
     "$ROOT_DIR/loop.sh" check
     echo "[loop.sh] Đang chạy Python Unit Tests..."
     python3 -m unittest discover -s "$ROOT_DIR/tests" -p "test_*.py" -v
@@ -308,24 +386,47 @@ PY
       "$ROOT_DIR/tools/godot/godot" --headless --path "$ROOT_DIR" --script res://tests/test_trex_turn.gd
       "$ROOT_DIR/tools/godot/godot" --headless --path "$ROOT_DIR" --script res://tests/test_chilopoda_actions.gd
       "$ROOT_DIR/tools/godot/godot" --headless --path "$ROOT_DIR" --script res://tests/test_arena_sandbox.gd
+      "$ROOT_DIR/tools/godot/godot" --headless --path "$ROOT_DIR" --script res://tests/test_alpha_login_and_sync.gd
+      "$ROOT_DIR/tools/godot/godot" --headless --path "$ROOT_DIR" --script res://tests/test_headless_two_clients.gd
       "$ROOT_DIR/tools/godot/godot" --headless --path "$ROOT_DIR" --script res://tests/test_floating_camera_actions.gd
       "$ROOT_DIR/tools/godot/godot" --headless --path "$ROOT_DIR" --script res://tests/test_shenron_summon.gd
       "$ROOT_DIR/tools/godot/godot" --headless --path "$ROOT_DIR" --script res://tests/test_dragon_ball_items.gd
+      RAN_SUITES+=("Godot 4")
       if command -v xvfb-run >/dev/null 2>&1; then
         echo "[loop.sh] Đang chạy Godot Compatibility Shader GPU Tests (opengl3)..."
         xvfb-run -a "$ROOT_DIR/tools/godot/godot" --rendering-driver opengl3 --path "$ROOT_DIR" --script res://tests/test_compatibility_shaders.gd
         xvfb-run -a "$ROOT_DIR/tools/godot/godot" --rendering-driver opengl3 --path "$ROOT_DIR" --script res://tests/test_shenron_dissolve_render.gd
+        RAN_SUITES+=("Shaders")
+      else
+        echo "[SKIP] Bỏ qua Godot OpenGL3 Shader GPU Tests vì môi trường chưa cài 'xvfb-run'." >&2
+        SKIPPED_SUITES+=("Shaders(no-xvfb-run)")
       fi
+    else
+      echo "[SKIP] Bỏ qua Godot 4 Headless Engine Verification vì chưa có binary tools/godot/godot." >&2
+      SKIPPED_SUITES+=("Godot4(no-binary)" "Shaders(no-godot)")
     fi
     if [ -f "$ROOT_DIR/engines/rust_combat_sim/Cargo.toml" ] && command -v cargo >/dev/null 2>&1; then
-      echo "[loop.sh] Đang chạy Rust 1.99.1 Real-Time >2,000 Combat Engine Unit Tests..."
+      RUSTC_VER="$(rustc --version 2>/dev/null || echo 'Rust')"
+      echo "[loop.sh] Đang chạy ${RUSTC_VER} Real-Time >2,000 Combat Engine Unit Tests..."
       cargo test --manifest-path "$ROOT_DIR/engines/rust_combat_sim/Cargo.toml"
+      RAN_SUITES+=("Rust")
+    else
+      echo "[SKIP] Bỏ qua Rust cargo test vì môi trường chưa cài 'cargo'." >&2
+      SKIPPED_SUITES+=("Rust(no-cargo)")
     fi
-    echo "[OK] Kiểm thử kỹ thuật './loop.sh test' (Governance + Python + Godot 4 + Shaders + Rust) exit 0. Nghiệm thu chuyển động theo motion_quality và Owner Human Test riêng."
+    RAN_SUMMARY="$(printf '%s + ' "${RAN_SUITES[@]}")"
+    RAN_SUMMARY="${RAN_SUMMARY% + }"
+    if [ "${#SKIPPED_SUITES[@]}" -gt 0 ]; then
+      SKIP_SUMMARY="$(printf '%s, ' "${SKIPPED_SUITES[@]}")"
+      SKIP_SUMMARY="${SKIP_SUMMARY%, }"
+      echo "[OK] Kiểm thử kỹ thuật './loop.sh test' ĐÃ CHẠY: (${RAN_SUMMARY}) exit 0 | BỎ QUA: [${SKIP_SUMMARY}]. Nghiệm thu chuyển động theo motion_quality và Owner Human Test riêng."
+    else
+      echo "[OK] Kiểm thử kỹ thuật './loop.sh test' (${RAN_SUMMARY}) exit 0. Nghiệm thu chuyển động theo motion_quality và Owner Human Test riêng."
+    fi
     ;;
 
   *)
-    echo "Cách dùng: ./loop.sh {status|check|test|web-export|apk-debug|log-task <ID> <status> <summary>|--agy-session-start}" >&2
+    echo "Cách dùng: ./loop.sh {status|check|test|serve|web-export|apk-debug|ios-repack [base.ipa]|build-all|log-task <ID> <status> <summary>|--agy-session-start}" >&2
     exit 1
     ;;
 esac
